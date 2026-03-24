@@ -47,7 +47,11 @@ def _ensure_installed():
         )
     if not chrome_paths:
         print('Installing browser (one-time, may take a minute)...')
-        subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium', '--with-deps'])
+        try:
+            subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium', '--with-deps'])
+        except subprocess.CalledProcessError:
+            # --with-deps may fail without sudo; try without it
+            subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium'])
         print('Browser installed.')
 
 _ensure_installed()
@@ -617,9 +621,15 @@ def ensure_playwright_browser(headless=True):
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    # Find the installed chromium binary
+    # Find the installed chromium binary (works on Linux, Mac, Windows, root or user)
     import glob as _glob
-    _chrome_paths = sorted(_glob.glob('/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome'))
+    _home = os.path.expanduser('~')
+    _chrome_paths = sorted(
+        _glob.glob('/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome') +
+        _glob.glob(f'{_home}/.cache/ms-playwright/chromium-*/chrome-linux/chrome') +
+        _glob.glob(f'{_home}/Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium') +
+        _glob.glob(f'{_home}/AppData/Local/ms-playwright/chromium-*/chrome-win/chrome.exe')
+    )
     _exec_path = _chrome_paths[-1] if _chrome_paths else None
 
     launch_args = {
@@ -1381,6 +1391,7 @@ else:
 
     print('  Logging into LeaseBreak...')
     lb_rows = []
+    pg_lb = None
     try:
         pg_lb = ctx.new_page()
         pg_lb.goto(f'{LB_BASE}/login', timeout=30000, wait_until='domcontentloaded')
@@ -1489,6 +1500,7 @@ else:
 
     print('  Logging into SpareRoom...')
     sr_rows = []
+    pg_sr = None
     try:
         pg_sr = ctx.new_page()
         pg_sr.goto('https://www.spareroom.com/logon/', timeout=30000, wait_until='domcontentloaded')
@@ -1532,7 +1544,7 @@ else:
                     const href = a.href;
                     if (seen.has(href)) return;
                     if (!href.includes('spareroom.com')) return;
-                    if (!href.includes('/rooms-for-rent/') && !href.includes('/flat-share/')) return;
+                    if (!href.includes('/rooms-for-rent/') && !href.includes('/flat-share/') && !href.includes('/flatshare/') && !href.includes('/roommate/')) return;
                     if (href.length < 40) return;
                     let card = a.closest('li, div, article');
                     if (!card) return;
@@ -1588,6 +1600,7 @@ else:
 
     print('  Logging into Sublet.com...')
     sc_rows = []
+    pg_sc = None
     try:
         pg_sc = ctx.new_page()
         pg_sc.goto('https://www.sublet.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1624,7 +1637,7 @@ else:
         () => {
             const results = [];
             const seen = new Set();
-            document.querySelectorAll('a[href*="/property/"]').forEach(a => {
+            document.querySelectorAll('a[href*="/property/"], a[href*="/listing/"], a[href*="/sublet/"]').forEach(a => {
                 const href = a.href;
                 if (seen.has(href)) return;
                 seen.add(href);
@@ -1677,6 +1690,7 @@ else:
 
     print('  Logging into SabbaticalHomes...')
     sh_rows = []
+    pg_sh = None
     try:
         pg_sh = ctx.new_page()
         pg_sh.goto('https://www.sabbaticalhomes.com/Login', timeout=30000, wait_until='domcontentloaded')
@@ -1784,6 +1798,7 @@ else:
 
     print('  Logging into Zumper...')
     zm_rows = []
+    pg_zm = None
     try:
         pg_zm = ctx.new_page()
         pg_zm.goto('https://www.zumper.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1833,9 +1848,8 @@ else:
                         const href = a.href;
                         if (seen.has(href)) return;
                         if (!href.includes('zumper.com')) return;
-                        if (!href.includes('/address/') && !href.includes('/apartment/') && !href.includes('/pad/')) return;
+                        if (!href.includes('/address/') && !href.includes('/apartment') && !href.includes('/pad/') && !href.includes('/rent/') && !href.includes('/rooms-for-rent/')) return;
                         let card = a.closest('li, div[class], article') || a.parentElement;
-                        if (!card) return;
                         if (!card) return;
                         const text = card.innerText || '';
                         if (text.length < 30 || text.length > 2000) return;
@@ -1895,6 +1909,7 @@ else:
 
     print('  Logging into Loftey...')
     lf_rows = []
+    pg_lf = None
     try:
         pg_lf = ctx.new_page()
         pg_lf.goto('https://loftey.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1946,7 +1961,7 @@ else:
                         const href = a.href;
                         if (seen.has(href)) return;
                         if (!href.includes('loftey.com')) return;
-                        if (!href.includes('/property/') && !href.includes('/apartment') && !href.includes('/listing') && !href.includes('/rental')) return;
+                        if (!href.includes('/property/') && !href.includes('/apartment') && !href.includes('/listing') && !href.includes('/rental') && !href.includes('/for-rent/')) return;
                         if (href.includes('/login') || href.includes('/about') || href.includes('/blog')) return;
                         let card = a.closest('li, div[class], article') || a.parentElement;
                         if (!card) return;
@@ -2011,9 +2026,10 @@ else:
 
     OHANA_URL = 'https://liveohana.ai/sublet/new-york-city'
     oh_rows = []
-    pg_oh = ctx.new_page()
+    pg_oh = None
 
     try:
+        pg_oh = ctx.new_page()
         # Login to Ohana first
         print('  Logging into Ohana...')
         try:
@@ -2126,7 +2142,7 @@ else:
                         'poster_type': 'Tenant (sublet)',
                         'dates': item.get('dates',''),
                         'description': f"Ohana sublet from {host}. {item.get('posted','')}. {'Open-ended.' if is_open else ''}",
-                        'url': OHANA_URL, 'scraped_at': now_iso(),
+                        'url': f"{OHANA_URL}#ohana-{len(oh_rows)}", 'scraped_at': now_iso(),
                     })
 
                 # Next page
@@ -2177,9 +2193,10 @@ else:
     ]
 
     jh_rows = []
-    pg_jh = ctx.new_page()
+    pg_jh = None
 
     try:
+        pg_jh = ctx.new_page()
         # Login to JuneHomes first
         print('  Logging into JuneHomes...')
         try:
@@ -2247,6 +2264,8 @@ else:
             except Exception as e:
                 print(f'    Error: {e}')
             polite_sleep(3, 6)
+    except Exception as e:
+        print(f'  ❌ JuneHomes error: {e}')
     finally:
         safe_close_page(pg_jh)
 
@@ -2324,10 +2343,11 @@ else:
                 continue
         return ""
 
-    lp_pg = ctx.new_page()
+    lp_pg = None
     lp_rows = []
 
     try:
+        lp_pg = ctx.new_page()
         print('  Logging into Listings Project...')
         lp_pg.goto('https://www.listingsproject.com/login', timeout=30000, wait_until='domcontentloaded')
         lp_pg.wait_for_timeout(3000)
@@ -2423,7 +2443,6 @@ else:
                 print(f'    ⚠ error: {e}')
 
         print(f'\n✅ Listings Project discovery complete: {len(lp_rows)} rows')
-        ALL_RESULTS.extend(lp_rows)
     except Exception as e:
         print(f'❌ Listings Project discovery failed: {e}')
     finally:
@@ -2431,6 +2450,8 @@ else:
             lp_pg.close()
         except Exception:
             pass
+
+    ALL_RESULTS.extend(lp_rows)
 
 
 
