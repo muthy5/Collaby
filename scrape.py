@@ -620,7 +620,11 @@ def ensure_playwright_browser(headless=True):
 
     from playwright.sync_api import sync_playwright
 
-    pw = sync_playwright().start()
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        print(f'  ❌ Playwright could not start: {e}')
+        return None, None, None
     # Find the installed chromium binary (works on Linux, Mac, Windows, root or user)
     import glob as _glob
     _home = os.path.expanduser('~')
@@ -645,7 +649,12 @@ def ensure_playwright_browser(headless=True):
     }
     if _exec_path:
         launch_args['executable_path'] = _exec_path
-    browser = pw.chromium.launch(**launch_args)
+    try:
+        browser = pw.chromium.launch(**launch_args)
+    except Exception as e:
+        print(f'  ❌ Chromium could not launch: {e}')
+        print(f'     exec_path={_exec_path}, paths_found={_chrome_paths}')
+        return None, None, None
     ctx = browser.new_context(
         viewport={'width': 1440, 'height': 900},
         user_agent=HEADERS['User-Agent'],
@@ -653,6 +662,15 @@ def ensure_playwright_browser(headless=True):
     ctx.set_default_timeout(25000)
     page = ctx.new_page()
     return browser, ctx, page
+
+def record_scrape_result(source, rows):
+    """Update SOURCE_HEALTH after a scraper runs, so the run log shows what happened."""
+    current = SOURCE_HEALTH.get(source, {})
+    if current.get('status') == 'UNTESTED':
+        if rows:
+            SOURCE_HEALTH[source] = {'status': 'PASS', 'stage': 'scrape', 'details': f'{len(rows)} listings', 'artifacts': []}
+        else:
+            SOURCE_HEALTH[source] = {'status': 'DEGRADED', 'stage': 'scrape', 'details': '0 listings returned', 'artifacts': []}
 
 def safe_close_page(pg):
     try:
@@ -931,7 +949,10 @@ print('✅ Authenticated discovery helpers loaded')
 # Cell 8: Launch Playwright (Colab-safe)
 # ═══════════════════════════════════════
 ensure_playwright_browser(headless=True)
-print('✅ Playwright browser ready (headless, no-sandbox)')
+if ctx is None:
+    print('⚠️ Browser failed to launch. Browser-based scrapers will be skipped.')
+else:
+    print('✅ Playwright browser ready (headless, no-sandbox)')
 
 # ## Preflight
 
@@ -956,6 +977,9 @@ if not PREFLIGHT_ENABLED:
     print('ℹ️ Preflight disabled in config.')
 else:
     ensure_playwright_browser(headless=True)
+    if ctx is None:
+        print('⚠️ Browser failed to launch — skipping all browser-based preflight checks.')
+        print('   Scrapers will still attempt to run (they call ensure_playwright_browser individually).')
 
     PREFLIGHT_RESULTS.clear()
     for _src in SOURCE_POLICIES:
@@ -1006,6 +1030,10 @@ else:
     def _preflight_browser(source, stage, url, selector_groups=None, must_find_any=None,
                            must_find_all=None, min_body_chars=250, min_anchor_count=2,
                            wait_until='domcontentloaded', wait_ms=None):
+        if ctx is None:
+            record_preflight(source, 'FAIL', stage, 'browser_not_available', url, [])
+            print(f'  {source:>18} | {stage:<18} | FAIL     | browser_not_available')
+            return
         selector_groups = selector_groups or []
         must_find_any = must_find_any or []
         must_find_all = must_find_all or []
@@ -1367,6 +1395,7 @@ else:
         polite_sleep(2, 4)
 
     ALL_RESULTS.extend(cl_rows)
+    record_scrape_result("Craigslist", cl_rows)
     print(f'\n✅ Craigslist: {len(cl_rows)} listings')
     if cl_rows:
         print(f'   Sample: {cl_rows[0]["title"][:60]} — {cl_rows[0]["price_raw"]}')
@@ -1479,6 +1508,7 @@ else:
         safe_close_page(pg_lb)
 
     ALL_RESULTS.extend(lb_rows)
+    record_scrape_result("LeaseBreak", lb_rows)
     print(f'\n✅ LeaseBreak: {len(lb_rows)} listings')
 
 
@@ -1579,6 +1609,7 @@ else:
         safe_close_page(pg_sr)
 
     ALL_RESULTS.extend(sr_rows)
+    record_scrape_result("SpareRoom", sr_rows)
     print(f'\n✅ SpareRoom: {len(sr_rows)} listings')
 
 
@@ -1669,6 +1700,7 @@ else:
         safe_close_page(pg_sc)
 
     ALL_RESULTS.extend(sc_rows)
+    record_scrape_result("Sublet.com", sc_rows)
     print(f'\n✅ Sublet.com: {len(sc_rows)} listings')
 
 
@@ -1777,6 +1809,7 @@ else:
         safe_close_page(pg_sh)
 
     ALL_RESULTS.extend(sh_rows)
+    record_scrape_result("SabbaticalHomes", sh_rows)
     print(f'\n✅ SabbaticalHomes: {len(sh_rows)} listings')
 
 
@@ -1887,6 +1920,7 @@ else:
         safe_close_page(pg_zm)
 
     ALL_RESULTS.extend(zm_rows)
+    record_scrape_result("Zumper", zm_rows)
     print(f'\n✅ Zumper: {len(zm_rows)} listings')
 
 
@@ -2001,6 +2035,7 @@ else:
         safe_close_page(pg_lf)
 
     ALL_RESULTS.extend(lf_rows)
+    record_scrape_result("Loftey", lf_rows)
     print(f'\n✅ Loftey: {len(lf_rows)} listings')
 
 
@@ -2170,6 +2205,7 @@ else:
         safe_close_page(pg_oh)
 
     ALL_RESULTS.extend(oh_rows)
+    record_scrape_result("Ohana", oh_rows)
     print(f'\n✅ Ohana: {len(oh_rows)} listings')
 
 
@@ -2270,6 +2306,7 @@ else:
         safe_close_page(pg_jh)
 
     ALL_RESULTS.extend(jh_rows)
+    record_scrape_result("June Homes", jh_rows)
     print(f'\n✅ JuneHomes: {len(jh_rows)} listings')
 
 
@@ -2316,6 +2353,7 @@ else:
         polite_sleep(3, 5)
 
     ALL_RESULTS.extend(rh_rows)
+    record_scrape_result("RentHop", rh_rows)
     print(f'\n✅ RentHop: {len(rh_rows)} listings')
 
 
@@ -2452,6 +2490,7 @@ else:
             pass
 
     ALL_RESULTS.extend(lp_rows)
+    record_scrape_result("Listings Project", lp_rows)
 
 
 
