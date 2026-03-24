@@ -4,21 +4,24 @@ Collaby searches 11 apartment/sublet websites in NYC and saves what it finds int
 
 ---
 
-## Run It (2 steps)
+## Run It
 
 ### 1. Get Python (if you don't have it)
 
-- **Mac**: Download from https://www.python.org/downloads/ and install
 - **Windows**: Download from https://www.python.org/downloads/ and install. CHECK THE BOX that says **"Add Python to PATH"**
+- **Mac**: Download from https://www.python.org/downloads/ and install
 
 ### 2. Download and run
 
-Download this repo (green "Code" button > "Download ZIP" on GitHub), unzip it, then open Terminal (Mac) or Command Prompt (Windows):
+Download this repo (green **Code** button > **Download ZIP** on GitHub), unzip it, then:
 
-```
-cd Collaby
-python3 scrape.py
-```
+- **Windows**: Double-click `run.bat`
+- **Mac/Linux**: Double-click `run.sh` (or open Terminal, `cd Collaby`, `./run.sh`)
+- **PowerShell**: Open PowerShell, then:
+  ```
+  cd Collaby
+  python scrape.py
+  ```
 
 That's it. Everything else installs automatically the first time.
 
@@ -42,7 +45,7 @@ Open CSV files with Excel, Google Sheets, or Numbers.
 
 ## If Something Goes Wrong
 
-**"command not found: python3"** — Try `python` instead of `python3`.
+**"python is not recognized"** — Python isn't installed or not in PATH. Reinstall Python and CHECK the "Add to PATH" box.
 
 **A website shows 0 listings** — That site may have changed its layout. The scraper skips it and keeps going.
 
@@ -62,4 +65,4 @@ TARGET_STREET_MIN = 20          # southern boundary (20th St)
 TARGET_STREET_MAX = 62          # northern boundary (62nd St)
 ```
 
-Save and run `python3 scrape.py` again.
+Save and run again.
