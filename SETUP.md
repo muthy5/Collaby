@@ -4,28 +4,44 @@ Collaby searches 11 apartment/sublet websites in NYC and saves what it finds int
 
 ---
 
-## Run It
+## iPhone / iPad
 
-### 1. Get Python (if you don't have it)
+1. Open this link in Safari: https://colab.research.google.com/github/muthy5/Collaby/blob/main/collaby_colab.ipynb
+2. Sign in with your Google account
+3. Tap **Runtime** > **Run all**
+4. Wait 5-15 minutes
+5. A zip file downloads automatically when done
 
-- **Windows**: Download from https://www.python.org/downloads/ and install. CHECK THE BOX that says **"Add Python to PATH"**
-- **Mac**: Download from https://www.python.org/downloads/ and install
+That's it. Open the CSV files in Google Sheets or Numbers.
 
-### 2. Download and run
+---
 
-Download this repo (green **Code** button > **Download ZIP** on GitHub), unzip it, then:
+## Windows
 
-- **Windows**: Double-click `run.bat`
-- **Mac/Linux**: Double-click `run.sh` (or open Terminal, `cd Collaby`, `./run.sh`)
-- **PowerShell**: Open PowerShell, then:
-  ```
-  cd Collaby
-  python scrape.py
-  ```
+1. Install Python from https://www.python.org/downloads/ — CHECK the box **"Add Python to PATH"**
+2. Download this repo (green **Code** button > **Download ZIP**), unzip it
+3. Double-click `run.bat`
 
-That's it. Everything else installs automatically the first time.
+---
 
-Wait 5-15 minutes. When it's done, your results are in the `output/` folder and a zip file.
+## Mac / Linux
+
+1. Install Python from https://www.python.org/downloads/
+2. Download this repo (green **Code** button > **Download ZIP**), unzip it
+3. Double-click `run.sh`
+
+---
+
+## PowerShell
+
+```
+cd Collaby
+python scrape.py
+```
+
+---
+
+Everything installs automatically on first run. Wait 5-15 minutes for results.
 
 ---
 
@@ -45,7 +61,7 @@ Open CSV files with Excel, Google Sheets, or Numbers.
 
 ## If Something Goes Wrong
 
-**"python is not recognized"** — Python isn't installed or not in PATH. Reinstall Python and CHECK the "Add to PATH" box.
+**"python is not recognized"** — Reinstall Python and CHECK the "Add to PATH" box.
 
 **A website shows 0 listings** — That site may have changed its layout. The scraper skips it and keeps going.
 
@@ -55,7 +71,7 @@ Open CSV files with Excel, Google Sheets, or Numbers.
 
 ## Change Your Search
 
-Open `scrape.py` in any text editor and change these numbers near the top:
+Open `scrape.py` (or the notebook) in any text editor and change these numbers near the top:
 
 ```python
 SEARCH_MAX_MONTHLY = 4500       # max rent per month
