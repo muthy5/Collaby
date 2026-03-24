@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
-"""NYC Listings Scout — Discovery Only (standalone script)"""
+"""
+NYC Listings Scout — Download and run. That's it.
 
-# # NYC Listings Scout — Discovery Only
-# 
-# This notebook is the **discovery stage only**.
-# 
-# It should:
-# - collect candidate listings from the active sources
-# - apply the current constraints:
-#   - max monthly rent: **$4,500**
-#   - area: **Hell's Kitchen / Chelsea / Hudson Yards / Lincoln Center**
-#   - fallback box: **8th–12th Ave, 20th–62nd St**
-#   - duration: **roughly 3–6 months**
-# - classify rows into:
-#   - `exact_address_hit`
-#   - `contact_queue`
-#   - `manual_review_or_contact`
-#   - `parser_review`
-#   - `skip_not_goal`
-# 
-# It should **not**:
-# - send inquiries
-# - try to unlock addresses by messaging
-# - perform the Craigslist address follow-up pass
-# - mix email/contact logic into the scrape
-# 
+    python3 scrape.py
 
-# Cell 1: Dependencies (install separately)
-# pip install requests beautifulsoup4 lxml pandas playwright
-# playwright install chromium --with-deps
+First run installs everything automatically. Takes 5-15 minutes.
+Results land in the output/ folder and a zip file.
+"""
+
+# ═══════════════════════════════════════
+# Auto-install dependencies — no manual setup needed
+# ═══════════════════════════════════════
+import subprocess, sys
+
+def _ensure_installed():
+    packages = {
+        'requests': 'requests',
+        'bs4': 'beautifulsoup4',
+        'lxml': 'lxml',
+        'pandas': 'pandas',
+        'playwright': 'playwright',
+    }
+    missing = []
+    for module, pip_name in packages.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(pip_name)
+
+    if missing:
+        print(f'Installing: {", ".join(missing)}...')
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q'] + missing)
+        print('Done.')
+
+    # Check if playwright chromium is installed
+    import glob as _g
+    chrome_paths = _g.glob('/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome')
+    if not chrome_paths:
+        # Also check common user paths
+        import os
+        home = os.path.expanduser('~')
+        chrome_paths = (
+            _g.glob(f'{home}/.cache/ms-playwright/chromium-*/chrome-linux/chrome') +
+            _g.glob(f'{home}/Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium') +
+            _g.glob(f'{home}/AppData/Local/ms-playwright/chromium-*/chrome-win/chrome.exe')
+        )
+    if not chrome_paths:
+        print('Installing browser (one-time, may take a minute)...')
+        subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium', '--with-deps'])
+        print('Browser installed.')
+
+_ensure_installed()
 
 # ==================================================
 # Cell 2
