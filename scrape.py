@@ -730,18 +730,20 @@ def wait_for_human(page, source, timeout_seconds=120):
         return False
     if not any(p in body_text for p in CAPTCHA_PATTERNS):
         return False
-    # Bring browser to front
+    # Bring browser to front and beep to get attention
     try:
         page.bring_to_front()
     except Exception:
         pass
+    print('\a')  # System beep
     print(f'')
-    print(f'  ============================================')
-    print(f'  [{source}] CAPTCHA / ANTI-BOT DETECTED')
-    print(f'  ============================================')
-    print(f'  1. Switch to the Chrome window (check your taskbar)')
-    print(f'  2. Solve the CAPTCHA or verify yourself')
-    print(f'  3. Come back here and press ENTER')
+    print(f'  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+    print(f'  [{source}] NEEDS YOUR HELP - CAPTCHA DETECTED')
+    print(f'  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+    print(f'  1. Look at the CHROMIUM window in your taskbar')
+    print(f'     (NOT your regular Chrome — it is a separate window)')
+    print(f'  2. Solve the CAPTCHA or click "I am human"')
+    print(f'  3. Come back HERE to PowerShell and press ENTER')
     print(f'  ============================================')
     try:
         input('  >>> Press ENTER after solving (or ENTER to skip): ')
@@ -1483,11 +1485,11 @@ print('✅ Authenticated discovery helpers loaded')
 # ═══════════════════════════════════════
 # Cell 8: Launch Playwright (Colab-safe)
 # ═══════════════════════════════════════
-ensure_playwright_browser(headless=True)
+ensure_playwright_browser(headless=False)
 if ctx is None:
     print('⚠️ Browser failed to launch. Browser-based scrapers will be skipped.')
 else:
-    print('✅ Playwright browser ready (headless, no-sandbox)')
+    print('✅ Playwright browser ready (visible mode — you will see a Chrome window)')
 
 # ## Preflight
 
