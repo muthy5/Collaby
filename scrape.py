@@ -20,6 +20,7 @@ def _ensure_installed():
         'lxml': 'lxml',
         'pandas': 'pandas',
         'playwright': 'playwright',
+        'anthropic': 'anthropic',
     }
     missing = []
     for module, pip_name in packages.items():
@@ -47,7 +48,11 @@ def _ensure_installed():
         )
     if not chrome_paths:
         print('Installing browser (one-time, may take a minute)...')
-        subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium', '--with-deps'])
+        try:
+            subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium', '--with-deps'])
+        except subprocess.CalledProcessError:
+            # --with-deps may fail without sudo; try without it
+            subprocess.check_call([sys.executable, '-m', 'playwright', 'install', 'chromium'])
         print('Browser installed.')
 
 _ensure_installed()
@@ -616,10 +621,20 @@ def ensure_playwright_browser(headless=True):
 
     from playwright.sync_api import sync_playwright
 
-    pw = sync_playwright().start()
-    # Find the installed chromium binary
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        print(f'  ❌ Playwright could not start: {e}')
+        return None, None, None
+    # Find the installed chromium binary (works on Linux, Mac, Windows, root or user)
     import glob as _glob
-    _chrome_paths = sorted(_glob.glob('/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome'))
+    _home = os.path.expanduser('~')
+    _chrome_paths = sorted(
+        _glob.glob('/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome') +
+        _glob.glob(f'{_home}/.cache/ms-playwright/chromium-*/chrome-linux/chrome') +
+        _glob.glob(f'{_home}/Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium') +
+        _glob.glob(f'{_home}/AppData/Local/ms-playwright/chromium-*/chrome-win/chrome.exe')
+    )
     _exec_path = _chrome_paths[-1] if _chrome_paths else None
 
     launch_args = {
@@ -635,7 +650,12 @@ def ensure_playwright_browser(headless=True):
     }
     if _exec_path:
         launch_args['executable_path'] = _exec_path
-    browser = pw.chromium.launch(**launch_args)
+    try:
+        browser = pw.chromium.launch(**launch_args)
+    except Exception as e:
+        print(f'  ❌ Chromium could not launch: {e}')
+        print(f'     exec_path={_exec_path}, paths_found={_chrome_paths}')
+        return None, None, None
     ctx = browser.new_context(
         viewport={'width': 1440, 'height': 900},
         user_agent=HEADERS['User-Agent'],
@@ -643,6 +663,15 @@ def ensure_playwright_browser(headless=True):
     ctx.set_default_timeout(25000)
     page = ctx.new_page()
     return browser, ctx, page
+
+def record_scrape_result(source, rows):
+    """Update SOURCE_HEALTH after a scraper runs, so the run log shows what happened."""
+    current = SOURCE_HEALTH.get(source, {})
+    if current.get('status') == 'UNTESTED':
+        if rows:
+            SOURCE_HEALTH[source] = {'status': 'PASS', 'stage': 'scrape', 'details': f'{len(rows)} listings', 'artifacts': []}
+        else:
+            SOURCE_HEALTH[source] = {'status': 'DEGRADED', 'stage': 'scrape', 'details': '0 listings returned', 'artifacts': []}
 
 def safe_close_page(pg):
     try:
@@ -668,6 +697,439 @@ def close_playwright_browser():
     except Exception:
         pass
     pw = None
+
+# ═══════════════════════════════════════
+# AI Self-Healing Scraper System
+# When a scraper returns 0 results, use Claude to diagnose and recover.
+# ═══════════════════════════════════════
+HEAL_ENABLED = True
+HEAL_MAX_RETRIES = 1
+HEAL_LOG = []
+HEAL_ARTIFACT_DIR = OUTPUT_DIR / 'heal_artifacts'
+HEAL_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+HEAL_CACHE_PATH = OUTPUT_DIR / 'heal_cache.json'
+
+HEALER_SYSTEM_PROMPT = """You are an expert web scraping debugger. You analyze failed Playwright scraping attempts and produce structured recovery actions.
+
+You will receive:
+- The source site name and what data we expected
+- The current page URL and title
+- A truncated HTML snapshot
+- A screenshot of the page
+- Console errors captured during the scrape
+- The original scraping approach
+
+Your job: diagnose what went wrong and return a JSON recovery plan.
+
+Common failure modes:
+1. ANTI_BOT — Cloudflare, CAPTCHA, "verify you are human" interstitials
+2. SELECTOR_CHANGE — Site redesigned, CSS selectors no longer match
+3. LOGIN_FAILURE — Auth failed or session expired
+4. EMPTY_STATE — Page loaded but no listings (filters too narrow)
+5. NAVIGATION_CHANGE — URLs or page structure changed
+6. TIMEOUT — Page didn't fully load
+7. GEO_BLOCK — Site blocked based on IP/region
+
+RESPOND WITH VALID JSON ONLY. Structure:
+{
+    "diagnosis": "SELECTOR_CHANGE",
+    "explanation": "Brief explanation of what went wrong",
+    "confidence": 0.8,
+    "recovery_actions": [
+        {"action": "wait", "timeout_ms": 3000},
+        {"action": "scroll_to_bottom"},
+        {"action": "click", "selector": "button.load-more"},
+        {"action": "wait_for_selector", "selector": ".listing-card", "timeout_ms": 5000},
+        {
+            "action": "extract",
+            "js_code": "() => [...document.querySelectorAll('.listing-card')].map(el => ({title: (el.querySelector('h3,h2,.title') || {}).textContent || '', price: (el.querySelector('.price,[data-price]') || {}).textContent || '', url: (el.querySelector('a[href]') || {}).href || '', text: el.textContent.slice(0, 500)}))"
+        }
+    ],
+    "should_retry_login": false
+}
+
+Available actions: wait, click, scroll_to_bottom, scroll_up, goto (same-domain only), wait_for_selector, reload, fill (non-credential), press_key (Enter/Tab/Escape/ArrowDown/ArrowUp/Space/PageDown), extract.
+
+The extract action's js_code MUST be a () => expression that returns an array of objects with: title, price, url, text.
+
+Keep recovery_actions under 10 steps. Be practical — try the simplest fix first."""
+
+ALLOWED_HEAL_ACTIONS = {"wait", "click", "scroll_to_bottom", "scroll_up", "fill", "press_key",
+                        "goto", "wait_for_selector", "extract", "reload"}
+ALLOWED_HEAL_KEYS = {"Enter", "Tab", "Escape", "ArrowDown", "ArrowUp", "Space", "PageDown"}
+
+HEAL_SOURCE_CONTEXT = {
+    "LeaseBreak": {
+        "expected": "Apartment sublet/lease-break listings with prices, titles, URLs",
+        "approach": "Login then navigate to /sublets-nyc and /short-term-rentals-nyc, extract listing cards with prices",
+        "heal_urls": ["https://www.leasebreak.com/short-term-rentals-nyc"],
+    },
+    "SpareRoom": {
+        "expected": "Room and apartment share listings in NYC with weekly/monthly prices",
+        "approach": "Login then search for rooms in New York, extract listing cards",
+        "heal_urls": ["https://www.spareroom.com/flatshare/new_york"],
+    },
+    "Sublet.com": {
+        "expected": "Sublet and short-term rental listings in NYC with prices",
+        "approach": "Login then navigate to /new-york-city, extract listing items",
+        "heal_urls": ["https://www.sublet.com/new-york-city"],
+    },
+    "SabbaticalHomes": {
+        "expected": "Sabbatical/academic housing listings in NYC with prices",
+        "approach": "Login then browse NYC listings, extract property cards",
+        "heal_urls": ["https://www.sabbaticalhomes.com/Home/SearchResults?City=New+York&State=NY"],
+    },
+    "Zumper": {
+        "expected": "Apartment rental listings in NYC with monthly prices",
+        "approach": "Login then search NYC apartments, extract listing cards with prices and URLs",
+        "heal_urls": ["https://www.zumper.com/apartments-for-rent/new-york-ny"],
+    },
+    "Loftey": {
+        "expected": "Apartment rental listings in Manhattan with monthly prices",
+        "approach": "Login then browse neighborhood pages, extract listing cards",
+        "heal_urls": ["https://loftey.com/search?area=manhattan"],
+    },
+    "Ohana": {
+        "expected": "Co-living and roommate listings in NYC with prices",
+        "approach": "Login to Bubble.io app, navigate to listings, extract cards",
+        "heal_urls": ["https://liveohana.ai"],
+    },
+    "June Homes": {
+        "expected": "Flexible-lease furnished apartment listings in NYC with monthly prices",
+        "approach": "Login then browse NYC listings, extract listing cards",
+        "heal_urls": ["https://junehomes.com/apartments/new-york"],
+    },
+    "Listings Project": {
+        "expected": "Curated sublet and rental listings in NYC with prices",
+        "approach": "Login then navigate to NYC sublets page, scroll and extract listing links",
+        "heal_urls": ["https://www.listingsproject.com/real-estate/new-york-city/sublets"],
+    },
+}
+
+
+def _setup_console_capture(page):
+    """Attach a console error listener to a page for diagnostics."""
+    page._heal_console_errors = []
+    def _on_console(msg):
+        if msg.type in ('error', 'warning'):
+            page._heal_console_errors.append(f"[{msg.type}] {msg.text[:200]}")
+    page.on("console", _on_console)
+
+
+def capture_diagnostics(page, source, error_msg="0 results"):
+    """Capture current page state for AI analysis."""
+    diag = {"source": source, "error": error_msg}
+    try:
+        diag["url"] = page.url
+        diag["title"] = page.title()
+    except Exception:
+        diag["url"] = "unknown"
+        diag["title"] = "unknown"
+    try:
+        diag["html"] = page.content()[:15000]
+    except Exception:
+        diag["html"] = ""
+    try:
+        diag["screenshot_bytes"] = page.screenshot(full_page=False)
+    except Exception:
+        diag["screenshot_bytes"] = None
+    try:
+        diag["visible_text"] = page.locator('body').inner_text(timeout=5000)[:3000]
+    except Exception:
+        diag["visible_text"] = ""
+    diag["console_errors"] = getattr(page, '_heal_console_errors', [])
+    return diag
+
+
+def ask_claude_for_recovery(diagnostics, source_context):
+    """Send diagnostics to Claude API and get a structured recovery plan."""
+    import anthropic, base64
+
+    client = anthropic.Anthropic()
+
+    content_blocks = []
+    context_text = json.dumps({
+        "source": diagnostics["source"],
+        "expected_data": source_context.get("expected", "apartment listings with prices"),
+        "original_approach": source_context.get("approach", ""),
+        "current_url": diagnostics.get("url", ""),
+        "page_title": diagnostics.get("title", ""),
+        "error": diagnostics.get("error", ""),
+        "visible_text_sample": diagnostics.get("visible_text", "")[:2000],
+        "html_snippet": diagnostics.get("html", "")[:8000],
+        "console_errors": diagnostics.get("console_errors", [])[:20],
+    }, indent=2)
+    content_blocks.append({"type": "text", "text": context_text})
+
+    if diagnostics.get("screenshot_bytes"):
+        b64 = base64.b64encode(diagnostics["screenshot_bytes"]).decode()
+        content_blocks.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64}
+        })
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=HEALER_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(text)
+
+
+def execute_healing_action(page, action, source_domain):
+    """Execute a single allowlisted Playwright action. Returns True on success."""
+    from urllib.parse import urlparse
+    act = action.get("action")
+    if act not in ALLOWED_HEAL_ACTIONS:
+        print(f"    [heal] Blocked unknown action: {act}")
+        return False
+    try:
+        if act == "wait":
+            ms = min(action.get("timeout_ms", 2000), 10000)
+            page.wait_for_timeout(ms)
+        elif act == "click":
+            page.click(action["selector"], timeout=10000)
+        elif act == "scroll_to_bottom":
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        elif act == "scroll_up":
+            page.evaluate("window.scrollTo(0, 0)")
+        elif act == "goto":
+            url = action.get("url", "")
+            parsed = urlparse(url)
+            if parsed.netloc and source_domain not in parsed.netloc:
+                print(f"    [heal] Blocked cross-domain goto: {url}")
+                return False
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        elif act == "wait_for_selector":
+            ms = min(action.get("timeout_ms", 5000), 15000)
+            page.wait_for_selector(action["selector"], timeout=ms)
+        elif act == "reload":
+            page.reload(timeout=30000, wait_until="domcontentloaded")
+        elif act == "fill":
+            value = action.get("value", "")
+            for cred_set in CREDS.values():
+                if value == cred_set.get("password") or value == cred_set.get("email"):
+                    print("    [heal] Blocked fill with credential value")
+                    return False
+            page.fill(action["selector"], value, timeout=10000)
+        elif act == "press_key":
+            key = action.get("key", "")
+            if key not in ALLOWED_HEAL_KEYS:
+                print(f"    [heal] Blocked key: {key}")
+                return False
+            page.keyboard.press(key)
+        elif act == "extract":
+            pass  # Handled by caller
+        return True
+    except Exception as e:
+        print(f"    [heal] Action '{act}' failed: {e}")
+        return False
+
+
+def _save_heal_artifacts(source, diagnostics, plan, recovered):
+    """Save healing diagnostics to disk for review."""
+    slug = slugify(source)
+    if diagnostics.get("screenshot_bytes"):
+        with open(HEAL_ARTIFACT_DIR / f'{slug}_page.png', 'wb') as f:
+            f.write(diagnostics["screenshot_bytes"])
+    with open(HEAL_ARTIFACT_DIR / f'{slug}_diagnostics.json', 'w') as f:
+        safe_diag = {k: v for k, v in diagnostics.items() if k != 'screenshot_bytes'}
+        json.dump(safe_diag, f, indent=2, default=str)
+    with open(HEAL_ARTIFACT_DIR / f'{slug}_plan.json', 'w') as f:
+        json.dump(plan, f, indent=2, default=str)
+    if recovered:
+        with open(HEAL_ARTIFACT_DIR / f'{slug}_recovered.json', 'w') as f:
+            json.dump(recovered, f, indent=2, default=str)
+
+
+def load_heal_cache():
+    if HEAL_CACHE_PATH.exists():
+        try:
+            with open(HEAL_CACHE_PATH) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_heal_cache(cache):
+    with open(HEAL_CACHE_PATH, 'w') as f:
+        json.dump(cache, f, indent=2, default=str)
+
+
+def _try_cached_recovery(page, source, source_domain):
+    """Try a previously successful recovery plan from cache. Returns extracted rows or []."""
+    cache = load_heal_cache()
+    cached = cache.get(source)
+    if not cached or not cached.get("recovery_actions"):
+        return []
+    print(f"    [heal] Trying cached strategy (diagnosis: {cached.get('diagnosis', '?')})")
+    actions = cached["recovery_actions"]
+    extracted = []
+    for action in actions[:10]:
+        if action.get("action") == "extract":
+            js = action.get("js_code", "")
+            if js and len(js) <= 5000:
+                try:
+                    raw = page.evaluate(js)
+                    if isinstance(raw, list) and raw:
+                        extracted = raw
+                        print(f"    [heal] Cache hit: extracted {len(raw)} items")
+                except Exception as e:
+                    print(f"    [heal] Cached extract failed: {e}")
+        else:
+            execute_healing_action(page, action, source_domain)
+    return extracted
+
+
+def attempt_self_heal(page, source, error_msg="0 results", source_context=None):
+    """AI-powered recovery when a scraper fails. Returns list of recovered row dicts."""
+    if not HEAL_ENABLED:
+        return []
+    if source_context is None:
+        source_context = HEAL_SOURCE_CONTEXT.get(source, {})
+
+    print(f'\n  🔧 [{source}] Self-heal: investigating failure...')
+    heal_record = {"source": source, "trigger": error_msg, "attempted_at": now_iso(), "success": False}
+
+    try:
+        from urllib.parse import urlparse
+        diagnostics = capture_diagnostics(page, source, error_msg)
+        source_domain = urlparse(diagnostics.get("url", "")).netloc
+
+        # Try cached strategy first (skip API call if it works)
+        cached_rows = _try_cached_recovery(page, source, source_domain)
+        if cached_rows:
+            recovered = _convert_extracted_rows(source, cached_rows)
+            if recovered:
+                heal_record["success"] = True
+                heal_record["recovered_count"] = len(recovered)
+                heal_record["method"] = "cache"
+                HEAL_LOG.append(heal_record)
+                print(f'  ✅ [{source}] Self-heal recovered {len(recovered)} listings (cached strategy)')
+                return recovered
+
+        # Call Claude for diagnosis
+        polite_sleep(1, 2)
+        recovery_plan = ask_claude_for_recovery(diagnostics, source_context)
+
+        heal_record["diagnosis"] = recovery_plan.get("diagnosis", "UNKNOWN")
+        heal_record["confidence"] = recovery_plan.get("confidence", 0)
+        print(f'    Diagnosis: {recovery_plan.get("diagnosis")} '
+              f'(confidence: {recovery_plan.get("confidence", "?")})')
+        print(f'    Explanation: {recovery_plan.get("explanation", "")[:150]}')
+
+        # Execute recovery actions
+        actions = recovery_plan.get("recovery_actions", [])
+        extracted_rows = []
+        for i, action in enumerate(actions[:10]):
+            act_type = action.get("action")
+            print(f'    Step {i+1}/{min(len(actions), 10)}: {act_type}')
+            if act_type == "extract":
+                js = action.get("js_code", "")
+                if not js or len(js) > 5000:
+                    print("    [heal] Extract JS empty or too long, skipping")
+                    continue
+                try:
+                    raw = page.evaluate(js)
+                    if isinstance(raw, list):
+                        extracted_rows = raw
+                        print(f'    Extracted {len(raw)} items')
+                except Exception as e:
+                    print(f'    Extract failed: {e}')
+            else:
+                execute_healing_action(page, action, source_domain)
+
+        recovered = _convert_extracted_rows(source, extracted_rows)
+
+        _save_heal_artifacts(source, diagnostics, recovery_plan, recovered)
+
+        if recovered:
+            heal_record["success"] = True
+            heal_record["recovered_count"] = len(recovered)
+            heal_record["method"] = "api"
+            # Cache successful strategy
+            cache = load_heal_cache()
+            cache[source] = {
+                "diagnosis": recovery_plan.get("diagnosis"),
+                "recovery_actions": recovery_plan.get("recovery_actions", []),
+                "last_success": now_iso(),
+                "success_count": cache.get(source, {}).get("success_count", 0) + 1,
+            }
+            save_heal_cache(cache)
+            print(f'  ✅ [{source}] Self-heal recovered {len(recovered)} listings')
+        else:
+            print(f'  ⚠️ [{source}] Self-heal did not recover any listings')
+
+        HEAL_LOG.append(heal_record)
+        return recovered
+
+    except Exception as e:
+        print(f'  ❌ [{source}] Self-heal error: {e}')
+        heal_record["error"] = str(e)
+        HEAL_LOG.append(heal_record)
+        return []
+
+
+def _convert_extracted_rows(source, raw_items):
+    """Convert raw extracted JS objects into enriched row dicts."""
+    rows = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "")[:200]
+        price_text = item.get("price", "")
+        url = item.get("url", "")
+        text = item.get("text") or item.get("card_text") or ""
+        if not url and not title:
+            continue
+        pn, pp, em = parse_price(price_text)
+        rows.append({
+            "source": source,
+            "title": title or f"{source} listing",
+            "price_raw": f'${pn:,}/{pp}' if pn is not None else price_text,
+            "price_num": pn, "price_period": pp or "month", "est_monthly": em,
+            "neighborhood": "", "borough": "",
+            "bedrooms": detect_beds(text),
+            "furnished": detect_furnished(text),
+            "listing_type": "Sublet",
+            "poster_type": "",
+            "amenities": detect_amenities(text),
+            "building_clues": detect_building(text),
+            "description": text[:300],
+            "url": url,
+            "scraped_at": now_iso(),
+            "_healed": True,
+        })
+    return rows
+
+
+def trigger_heal(source, heal_url=None):
+    """Convenience wrapper: open a fresh page, navigate, and attempt self-heal."""
+    if not HEAL_ENABLED or ctx is None:
+        return []
+    source_ctx = HEAL_SOURCE_CONTEXT.get(source, {})
+    url = heal_url or (source_ctx.get("heal_urls") or [None])[0]
+    if not url:
+        return []
+    heal_pg = None
+    try:
+        heal_pg = ctx.new_page()
+        _setup_console_capture(heal_pg)
+        heal_pg.goto(url, timeout=30000, wait_until='domcontentloaded')
+        heal_pg.wait_for_timeout(4000)
+        return attempt_self_heal(heal_pg, source)
+    except Exception as e:
+        print(f'  [heal] Could not open page for {source}: {e}')
+        return []
+    finally:
+        safe_close_page(heal_pg)
+
 
 # DOM / route preflight controls
 PREFLIGHT_ENABLED = True
@@ -921,7 +1383,10 @@ print('✅ Authenticated discovery helpers loaded')
 # Cell 8: Launch Playwright (Colab-safe)
 # ═══════════════════════════════════════
 ensure_playwright_browser(headless=True)
-print('✅ Playwright browser ready (headless, no-sandbox)')
+if ctx is None:
+    print('⚠️ Browser failed to launch. Browser-based scrapers will be skipped.')
+else:
+    print('✅ Playwright browser ready (headless, no-sandbox)')
 
 # ## Preflight
 
@@ -946,6 +1411,9 @@ if not PREFLIGHT_ENABLED:
     print('ℹ️ Preflight disabled in config.')
 else:
     ensure_playwright_browser(headless=True)
+    if ctx is None:
+        print('⚠️ Browser failed to launch — skipping all browser-based preflight checks.')
+        print('   Scrapers will still attempt to run (they call ensure_playwright_browser individually).')
 
     PREFLIGHT_RESULTS.clear()
     for _src in SOURCE_POLICIES:
@@ -996,6 +1464,10 @@ else:
     def _preflight_browser(source, stage, url, selector_groups=None, must_find_any=None,
                            must_find_all=None, min_body_chars=250, min_anchor_count=2,
                            wait_until='domcontentloaded', wait_ms=None):
+        if ctx is None:
+            record_preflight(source, 'FAIL', stage, 'browser_not_available', url, [])
+            print(f'  {source:>18} | {stage:<18} | FAIL     | browser_not_available')
+            return
         selector_groups = selector_groups or []
         must_find_any = must_find_any or []
         must_find_all = must_find_all or []
@@ -1357,6 +1829,7 @@ else:
         polite_sleep(2, 4)
 
     ALL_RESULTS.extend(cl_rows)
+    record_scrape_result("Craigslist", cl_rows)
     print(f'\n✅ Craigslist: {len(cl_rows)} listings')
     if cl_rows:
         print(f'   Sample: {cl_rows[0]["title"][:60]} — {cl_rows[0]["price_raw"]}')
@@ -1381,6 +1854,7 @@ else:
 
     print('  Logging into LeaseBreak...')
     lb_rows = []
+    pg_lb = None
     try:
         pg_lb = ctx.new_page()
         pg_lb.goto(f'{LB_BASE}/login', timeout=30000, wait_until='domcontentloaded')
@@ -1467,7 +1941,10 @@ else:
     finally:
         safe_close_page(pg_lb)
 
+    if not lb_rows:
+        lb_rows = trigger_heal("LeaseBreak")
     ALL_RESULTS.extend(lb_rows)
+    record_scrape_result("LeaseBreak", lb_rows)
     print(f'\n✅ LeaseBreak: {len(lb_rows)} listings')
 
 
@@ -1489,6 +1966,7 @@ else:
 
     print('  Logging into SpareRoom...')
     sr_rows = []
+    pg_sr = None
     try:
         pg_sr = ctx.new_page()
         pg_sr.goto('https://www.spareroom.com/logon/', timeout=30000, wait_until='domcontentloaded')
@@ -1532,7 +2010,7 @@ else:
                     const href = a.href;
                     if (seen.has(href)) return;
                     if (!href.includes('spareroom.com')) return;
-                    if (!href.includes('/rooms-for-rent/') && !href.includes('/flat-share/')) return;
+                    if (!href.includes('/rooms-for-rent/') && !href.includes('/flat-share/') && !href.includes('/flatshare/') && !href.includes('/roommate/')) return;
                     if (href.length < 40) return;
                     let card = a.closest('li, div, article');
                     if (!card) return;
@@ -1566,7 +2044,10 @@ else:
     finally:
         safe_close_page(pg_sr)
 
+    if not sr_rows:
+        sr_rows = trigger_heal("SpareRoom")
     ALL_RESULTS.extend(sr_rows)
+    record_scrape_result("SpareRoom", sr_rows)
     print(f'\n✅ SpareRoom: {len(sr_rows)} listings')
 
 
@@ -1588,6 +2069,7 @@ else:
 
     print('  Logging into Sublet.com...')
     sc_rows = []
+    pg_sc = None
     try:
         pg_sc = ctx.new_page()
         pg_sc.goto('https://www.sublet.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1624,7 +2106,7 @@ else:
         () => {
             const results = [];
             const seen = new Set();
-            document.querySelectorAll('a[href*="/property/"]').forEach(a => {
+            document.querySelectorAll('a[href*="/property/"], a[href*="/listing/"], a[href*="/sublet/"]').forEach(a => {
                 const href = a.href;
                 if (seen.has(href)) return;
                 seen.add(href);
@@ -1655,7 +2137,10 @@ else:
     finally:
         safe_close_page(pg_sc)
 
+    if not sc_rows:
+        sc_rows = trigger_heal("Sublet.com")
     ALL_RESULTS.extend(sc_rows)
+    record_scrape_result("Sublet.com", sc_rows)
     print(f'\n✅ Sublet.com: {len(sc_rows)} listings')
 
 
@@ -1677,6 +2162,7 @@ else:
 
     print('  Logging into SabbaticalHomes...')
     sh_rows = []
+    pg_sh = None
     try:
         pg_sh = ctx.new_page()
         pg_sh.goto('https://www.sabbaticalhomes.com/Login', timeout=30000, wait_until='domcontentloaded')
@@ -1762,7 +2248,10 @@ else:
     finally:
         safe_close_page(pg_sh)
 
+    if not sh_rows:
+        sh_rows = trigger_heal("SabbaticalHomes")
     ALL_RESULTS.extend(sh_rows)
+    record_scrape_result("SabbaticalHomes", sh_rows)
     print(f'\n✅ SabbaticalHomes: {len(sh_rows)} listings')
 
 
@@ -1784,6 +2273,7 @@ else:
 
     print('  Logging into Zumper...')
     zm_rows = []
+    pg_zm = None
     try:
         pg_zm = ctx.new_page()
         pg_zm.goto('https://www.zumper.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1833,9 +2323,8 @@ else:
                         const href = a.href;
                         if (seen.has(href)) return;
                         if (!href.includes('zumper.com')) return;
-                        if (!href.includes('/address/') && !href.includes('/apartment/') && !href.includes('/pad/')) return;
+                        if (!href.includes('/address/') && !href.includes('/apartment') && !href.includes('/pad/') && !href.includes('/rent/') && !href.includes('/rooms-for-rent/')) return;
                         let card = a.closest('li, div[class], article') || a.parentElement;
-                        if (!card) return;
                         if (!card) return;
                         const text = card.innerText || '';
                         if (text.length < 30 || text.length > 2000) return;
@@ -1872,7 +2361,10 @@ else:
     finally:
         safe_close_page(pg_zm)
 
+    if not zm_rows:
+        zm_rows = trigger_heal("Zumper")
     ALL_RESULTS.extend(zm_rows)
+    record_scrape_result("Zumper", zm_rows)
     print(f'\n✅ Zumper: {len(zm_rows)} listings')
 
 
@@ -1895,6 +2387,7 @@ else:
 
     print('  Logging into Loftey...')
     lf_rows = []
+    pg_lf = None
     try:
         pg_lf = ctx.new_page()
         pg_lf.goto('https://loftey.com/login', timeout=30000, wait_until='domcontentloaded')
@@ -1946,7 +2439,7 @@ else:
                         const href = a.href;
                         if (seen.has(href)) return;
                         if (!href.includes('loftey.com')) return;
-                        if (!href.includes('/property/') && !href.includes('/apartment') && !href.includes('/listing') && !href.includes('/rental')) return;
+                        if (!href.includes('/property/') && !href.includes('/apartment') && !href.includes('/listing') && !href.includes('/rental') && !href.includes('/for-rent/')) return;
                         if (href.includes('/login') || href.includes('/about') || href.includes('/blog')) return;
                         let card = a.closest('li, div[class], article') || a.parentElement;
                         if (!card) return;
@@ -1985,7 +2478,10 @@ else:
     finally:
         safe_close_page(pg_lf)
 
+    if not lf_rows:
+        lf_rows = trigger_heal("Loftey")
     ALL_RESULTS.extend(lf_rows)
+    record_scrape_result("Loftey", lf_rows)
     print(f'\n✅ Loftey: {len(lf_rows)} listings')
 
 
@@ -2011,9 +2507,10 @@ else:
 
     OHANA_URL = 'https://liveohana.ai/sublet/new-york-city'
     oh_rows = []
-    pg_oh = ctx.new_page()
+    pg_oh = None
 
     try:
+        pg_oh = ctx.new_page()
         # Login to Ohana first
         print('  Logging into Ohana...')
         try:
@@ -2126,7 +2623,7 @@ else:
                         'poster_type': 'Tenant (sublet)',
                         'dates': item.get('dates',''),
                         'description': f"Ohana sublet from {host}. {item.get('posted','')}. {'Open-ended.' if is_open else ''}",
-                        'url': OHANA_URL, 'scraped_at': now_iso(),
+                        'url': f"{OHANA_URL}#ohana-{len(oh_rows)}", 'scraped_at': now_iso(),
                     })
 
                 # Next page
@@ -2153,7 +2650,10 @@ else:
     finally:
         safe_close_page(pg_oh)
 
+    if not oh_rows:
+        oh_rows = trigger_heal("Ohana")
     ALL_RESULTS.extend(oh_rows)
+    record_scrape_result("Ohana", oh_rows)
     print(f'\n✅ Ohana: {len(oh_rows)} listings')
 
 
@@ -2177,9 +2677,10 @@ else:
     ]
 
     jh_rows = []
-    pg_jh = ctx.new_page()
+    pg_jh = None
 
     try:
+        pg_jh = ctx.new_page()
         # Login to JuneHomes first
         print('  Logging into JuneHomes...')
         try:
@@ -2247,10 +2748,15 @@ else:
             except Exception as e:
                 print(f'    Error: {e}')
             polite_sleep(3, 6)
+    except Exception as e:
+        print(f'  ❌ JuneHomes error: {e}')
     finally:
         safe_close_page(pg_jh)
 
+    if not jh_rows:
+        jh_rows = trigger_heal("June Homes")
     ALL_RESULTS.extend(jh_rows)
+    record_scrape_result("June Homes", jh_rows)
     print(f'\n✅ JuneHomes: {len(jh_rows)} listings')
 
 
@@ -2297,6 +2803,7 @@ else:
         polite_sleep(3, 5)
 
     ALL_RESULTS.extend(rh_rows)
+    record_scrape_result("RentHop", rh_rows)
     print(f'\n✅ RentHop: {len(rh_rows)} listings')
 
 
@@ -2324,10 +2831,11 @@ else:
                 continue
         return ""
 
-    lp_pg = ctx.new_page()
+    lp_pg = None
     lp_rows = []
 
     try:
+        lp_pg = ctx.new_page()
         print('  Logging into Listings Project...')
         lp_pg.goto('https://www.listingsproject.com/login', timeout=30000, wait_until='domcontentloaded')
         lp_pg.wait_for_timeout(3000)
@@ -2423,7 +2931,6 @@ else:
                 print(f'    ⚠ error: {e}')
 
         print(f'\n✅ Listings Project discovery complete: {len(lp_rows)} rows')
-        ALL_RESULTS.extend(lp_rows)
     except Exception as e:
         print(f'❌ Listings Project discovery failed: {e}')
     finally:
@@ -2431,6 +2938,11 @@ else:
             lp_pg.close()
         except Exception:
             pass
+
+    if not lp_rows:
+        lp_rows = trigger_heal("Listings Project")
+    ALL_RESULTS.extend(lp_rows)
+    record_scrape_result("Listings Project", lp_rows)
 
 
 
@@ -2547,6 +3059,7 @@ run_log = {
         'target_area': TARGET_AREA_LABEL,
     },
     'source_health': SOURCE_HEALTH,
+    'heal_log': HEAL_LOG,
 }
 run_log_path = OUTPUT_DIR / '01_run_log.json'
 with open(run_log_path, 'w', encoding='utf-8') as f:
@@ -2641,6 +3154,16 @@ try:
             diag.append(f"                     selector_hit={info.get('selector_hit')}  text_hit={info.get('text_hit')}  has_password={info.get('has_password')}")
 except NameError:
     diag.append("\n(AUTH_SESSION_LOG not available)")
+
+# Self-heal results
+if HEAL_LOG:
+    diag.append("\n\n=== SELF-HEAL LOG ===\n")
+    for h in HEAL_LOG:
+        status = '✅' if h.get('success') else '❌'
+        diag.append(f"  {h['source']:>18}: {status}  diagnosis={h.get('diagnosis', '?')}  "
+                    f"recovered={h.get('recovered_count', 0)}  method={h.get('method', '?')}")
+        if h.get('error'):
+            diag.append(f"                     error: {h['error'][:80]}")
 
 # Per-source row counts from results
 try:
