@@ -728,31 +728,35 @@ def wait_for_human(page, source, timeout_seconds=120):
         return False
     if not any(p in body_text for p in CAPTCHA_PATTERNS):
         return False
-    print(f'\n  ⚠️  [{source}] CAPTCHA or anti-bot detected!')
-    print(f'  👉  Solve it in the browser window, then come back here.')
-    print(f'  ⏳  Waiting up to {timeout_seconds}s for you...')
-    # Poll every 3 seconds until the CAPTCHA text disappears
-    waited = 0
-    while waited < timeout_seconds:
-        try:
-            page.wait_for_timeout(3000)
-        except (KeyboardInterrupt, Exception):
-            print(f'  ⏹  [{source}] Interrupted. Moving on.')
-            return False
-        waited += 3
-        try:
-            body_text = page.locator('body').inner_text(timeout=3000).lower()
-        except Exception:
-            break
+    # Bring browser to front
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    print(f'')
+    print(f'  ============================================')
+    print(f'  [{source}] CAPTCHA / ANTI-BOT DETECTED')
+    print(f'  ============================================')
+    print(f'  1. Switch to the Chrome window (check your taskbar)')
+    print(f'  2. Solve the CAPTCHA or verify yourself')
+    print(f'  3. Come back here and press ENTER')
+    print(f'  ============================================')
+    try:
+        input('  >>> Press ENTER after solving (or ENTER to skip): ')
+    except (KeyboardInterrupt, EOFError):
+        print(f'  Skipping {source}.')
+        return False
+    # Check if it was actually solved
+    try:
+        body_text = page.locator('body').inner_text(timeout=5000).lower()
         if not any(p in body_text for p in CAPTCHA_PATTERNS):
             print(f'  ✅  [{source}] CAPTCHA solved! Continuing...')
-            try:
-                page.wait_for_timeout(2000)
-            except Exception:
-                pass
             return True
-    print(f'  ⏰  [{source}] Timed out waiting for CAPTCHA solve. Skipping.')
-    return False
+        else:
+            print(f'  ⚠️  [{source}] Still blocked. Skipping.')
+            return False
+    except Exception:
+        return False
 
 
 def record_scrape_result(source, rows):
@@ -2274,6 +2278,7 @@ else:
         pg_lb = ctx.new_page()
         pg_lb.goto(f'{LB_BASE}/login', timeout=30000, wait_until='domcontentloaded')
         pg_lb.wait_for_timeout(3000)
+        wait_for_human(pg_lb, 'LeaseBreak')
 
         # Fill login form
         email_in = pg_lb.query_selector('input[type="email"], input[name="email"], input[name="username"]')
@@ -2391,6 +2396,7 @@ else:
         pg_sr = ctx.new_page()
         pg_sr.goto('https://www.spareroom.com/logon/', timeout=30000, wait_until='domcontentloaded')
         pg_sr.wait_for_timeout(3000)
+        wait_for_human(pg_sr, 'SpareRoom')
 
         email_in = pg_sr.query_selector('input[name="loginemail"], input[type="email"], input[name="email"]')
         pass_in = pg_sr.query_selector('input[name="loginpassword"], input[type="password"]')
@@ -2499,6 +2505,7 @@ else:
         pg_sc = ctx.new_page()
         pg_sc.goto('https://www.sublet.com/login', timeout=30000, wait_until='domcontentloaded')
         pg_sc.wait_for_timeout(3000)
+        wait_for_human(pg_sc, 'Sublet.com')
 
         email_in = pg_sc.query_selector('input[type="email"], input[name="email"], input[name="username"], input[name="login"]')
         pass_in = pg_sc.query_selector('input[type="password"]')
@@ -2597,6 +2604,7 @@ else:
         pg_sh = ctx.new_page()
         pg_sh.goto('https://www.sabbaticalhomes.com/Login', timeout=30000, wait_until='domcontentloaded')
         pg_sh.wait_for_timeout(3000)
+        wait_for_human(pg_sh, 'SabbaticalHomes')
 
         email_in = pg_sh.query_selector('input[type="email"], input[name="email"], input[name="username"], input[name="Email"]')
         pass_in = pg_sh.query_selector('input[type="password"]')
@@ -2713,6 +2721,7 @@ else:
         pg_zm = ctx.new_page()
         pg_zm.goto('https://www.zumper.com/login', timeout=30000, wait_until='domcontentloaded')
         pg_zm.wait_for_timeout(3000)
+        wait_for_human(pg_zm, 'Zumper')
 
         email_in = pg_zm.query_selector('input[type="email"], input[name="email"], input[placeholder*="email" i]')
         pass_in = pg_zm.query_selector('input[type="password"]')
@@ -2832,6 +2841,7 @@ else:
         pg_lf = ctx.new_page()
         pg_lf.goto('https://loftey.com/login', timeout=30000, wait_until='domcontentloaded')
         pg_lf.wait_for_timeout(3000)
+        wait_for_human(pg_lf, 'Loftey')
 
         email_in = pg_lf.query_selector('input[type="email"], input[name="email"], input[name="username"], input[placeholder*="email" i]')
         pass_in = pg_lf.query_selector('input[type="password"]')
@@ -2968,6 +2978,7 @@ else:
             else:
                 pg_oh.goto('https://liveohana.ai/login', timeout=20000, wait_until='domcontentloaded')
                 pg_oh.wait_for_timeout(3000)
+                wait_for_human(pg_oh, 'Ohana')
 
             email_in = pg_oh.query_selector('input[type="email"], input[name="email"], input[placeholder*="email" i]')
             pass_in = pg_oh.query_selector('input[type="password"]')
@@ -3136,6 +3147,7 @@ else:
         try:
             pg_jh.goto('https://junehomes.com/login', timeout=30000, wait_until='domcontentloaded')
             pg_jh.wait_for_timeout(3000)
+            wait_for_human(pg_jh, 'June Homes')
             email_in = pg_jh.query_selector('input[type="email"], input[name="email"], input[placeholder*="email" i]')
             pass_in = pg_jh.query_selector('input[type="password"]')
             if not email_in:
@@ -3294,6 +3306,7 @@ else:
         print('  Logging into Listings Project...')
         lp_pg.goto('https://www.listingsproject.com/login', timeout=30000, wait_until='domcontentloaded')
         lp_pg.wait_for_timeout(3000)
+        wait_for_human(lp_pg, 'Listings Project')
 
         email_in = lp_pg.query_selector('input[type="email"], input[name="email"]')
         pass_in = lp_pg.query_selector('input[type="password"]')
