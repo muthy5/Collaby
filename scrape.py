@@ -1111,7 +1111,10 @@ def _convert_extracted_rows(source, raw_items):
 
 def trigger_heal(source, heal_url=None):
     """Convenience wrapper: open a fresh page, navigate, and attempt self-heal."""
-    if not HEAL_ENABLED or ctx is None:
+    if not HEAL_ENABLED:
+        return []
+    ensure_playwright_browser()
+    if ctx is None:
         return []
     source_ctx = HEAL_SOURCE_CONTEXT.get(source, {})
     url = heal_url or (source_ctx.get("heal_urls") or [None])[0]
@@ -1844,6 +1847,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('LeaseBreak'):
     print("⏭ LeaseBreak skipped due to preflight status: " + site_preflight_status('LeaseBreak'))
     lb_rows = []
+    if not lb_rows:
+        lb_rows = trigger_heal("LeaseBreak")
+    ALL_RESULTS.extend(lb_rows)
+    record_scrape_result("LeaseBreak", lb_rows)
+    print(f'\n✅ LeaseBreak: {len(lb_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 5: LeaseBreak (authenticated)
@@ -1958,6 +1966,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('SpareRoom'):
     print("⏭ SpareRoom skipped due to preflight status: " + site_preflight_status('SpareRoom'))
     sr_rows = []
+    if not sr_rows:
+        sr_rows = trigger_heal("SpareRoom")
+    ALL_RESULTS.extend(sr_rows)
+    record_scrape_result("SpareRoom", sr_rows)
+    print(f'\n✅ SpareRoom: {len(sr_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 6: SpareRoom (authenticated, Playwright)
@@ -2061,6 +2074,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('Sublet.com'):
     print("⏭ Sublet.com skipped due to preflight status: " + site_preflight_status('Sublet.com'))
     sc_rows = []
+    if not sc_rows:
+        sc_rows = trigger_heal("Sublet.com")
+    ALL_RESULTS.extend(sc_rows)
+    record_scrape_result("Sublet.com", sc_rows)
+    print(f'\n✅ Sublet.com: {len(sc_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 7a: Sublet.com (authenticated, Playwright)
@@ -2154,6 +2172,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('SabbaticalHomes'):
     print("⏭ SabbaticalHomes skipped due to preflight status: " + site_preflight_status('SabbaticalHomes'))
     sh_rows = []
+    if not sh_rows:
+        sh_rows = trigger_heal("SabbaticalHomes")
+    ALL_RESULTS.extend(sh_rows)
+    record_scrape_result("SabbaticalHomes", sh_rows)
+    print(f'\n✅ SabbaticalHomes: {len(sh_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 7b: SabbaticalHomes (authenticated, Playwright)
@@ -2265,6 +2288,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('Zumper'):
     print("⏭ Zumper skipped due to preflight status: " + site_preflight_status('Zumper'))
     zm_rows = []
+    if not zm_rows:
+        zm_rows = trigger_heal("Zumper")
+    ALL_RESULTS.extend(zm_rows)
+    record_scrape_result("Zumper", zm_rows)
+    print(f'\n✅ Zumper: {len(zm_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 7c: Zumper (authenticated, Playwright)
@@ -2379,6 +2407,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('Loftey'):
     print("⏭ Loftey skipped due to preflight status: " + site_preflight_status('Loftey'))
     lf_rows = []
+    if not lf_rows:
+        lf_rows = trigger_heal("Loftey")
+    ALL_RESULTS.extend(lf_rows)
+    record_scrape_result("Loftey", lf_rows)
+    print(f'\n✅ Loftey: {len(lf_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 7d: Loftey (authenticated, Playwright)
@@ -2496,6 +2529,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('Ohana'):
     print("⏭ Ohana skipped due to preflight status: " + site_preflight_status('Ohana'))
     oh_rows = []
+    if not oh_rows:
+        oh_rows = trigger_heal("Ohana")
+    ALL_RESULTS.extend(oh_rows)
+    record_scrape_result("Ohana", oh_rows)
+    print(f'\n✅ Ohana: {len(oh_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 10: Ohana — Verified tenant sublets (authenticated)
@@ -2666,6 +2704,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('June Homes'):
     print("⏭ June Homes skipped due to preflight status: " + site_preflight_status('June Homes'))
     jh_rows = []
+    if not jh_rows:
+        jh_rows = trigger_heal("June Homes")
+    ALL_RESULTS.extend(jh_rows)
+    record_scrape_result("June Homes", jh_rows)
+    print(f'\n✅ June Homes: {len(jh_rows)} listings')
 else:
     # ═══════════════════════════════════════
     # Cell 11: JuneHomes — Furnished flex-lease
@@ -2816,6 +2859,11 @@ else:
 if PREFLIGHT_ENABLED and not site_preflight_ok('Listings Project'):
     print("⏭ Listings Project skipped due to preflight status: " + site_preflight_status('Listings Project'))
     lp_rows = []
+    if not lp_rows:
+        lp_rows = trigger_heal("Listings Project")
+    ALL_RESULTS.extend(lp_rows)
+    record_scrape_result("Listings Project", lp_rows)
+    print(f'\n✅ Listings Project: {len(lp_rows)} listings')
 else:
     ensure_playwright_browser()
 
