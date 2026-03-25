@@ -21,6 +21,7 @@ def _ensure_installed():
         'pandas': 'pandas',
         'playwright': 'playwright',
         'anthropic': 'anthropic',
+        'playwright_stealth': 'playwright-stealth',
     }
     missing = []
     for module, pip_name in packages.items():
@@ -69,7 +70,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pandas as pd
 
-# Load .env file so ANTHROPIC_API_KEY is available for self-heal
+# Load .env file if it exists (for ANTHROPIC_API_KEY etc.)
 _env_path = Path(__file__).resolve().parent / '.env'
 if _env_path.exists():
     with open(_env_path) as _ef:
@@ -78,6 +79,9 @@ if _env_path.exists():
             if _line and not _line.startswith('#') and '=' in _line:
                 _k, _v = _line.split('=', 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
+if not os.environ.get('ANTHROPIC_API_KEY'):
+    print('⚠️ ANTHROPIC_API_KEY not set. Self-heal will be disabled.')
+    print('  Create a .env file with: ANTHROPIC_API_KEY=sk-ant-...')
 
 OUTPUT_DIR = Path('output')
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -621,7 +625,7 @@ def running_in_colab():
     except Exception:
         return False
 
-def ensure_playwright_browser(headless=True):
+def ensure_playwright_browser(headless=False):
     global pw, browser, ctx, page
     try:
         if browser is not None and browser.is_connected() and ctx is not None:
@@ -656,6 +660,7 @@ def ensure_playwright_browser(headless=True):
             '--disable-gpu',
             '--no-first-run',
             '--no-zygote',
+            '--disable-blink-features=AutomationControlled',
         ],
     }
     if _exec_path:
@@ -671,6 +676,17 @@ def ensure_playwright_browser(headless=True):
         user_agent=HEADERS['User-Agent'],
     )
     ctx.set_default_timeout(25000)
+    # Apply stealth to every new page automatically
+    try:
+        from playwright_stealth import stealth_sync
+        _orig_new_page = ctx.new_page
+        def _stealth_new_page(**kwargs):
+            p = _orig_new_page(**kwargs)
+            stealth_sync(p)
+            return p
+        ctx.new_page = _stealth_new_page
+    except Exception:
+        pass
     page = ctx.new_page()
     return browser, ctx, page
 
@@ -1145,7 +1161,7 @@ def trigger_heal(source, heal_url=None):
 
 
 # DOM / route preflight controls
-PREFLIGHT_ENABLED = True
+PREFLIGHT_ENABLED = False  # Skip preflight — go straight to scraping
 PREFLIGHT_SKIP_FAILING_SOURCES = True
 PREFLIGHT_SKIP_DEGRADED_SOURCES = False
 PREFLIGHT_REQUEST_TIMEOUT = 20
