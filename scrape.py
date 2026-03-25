@@ -70,6 +70,17 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pandas as pd
 
+# Bridge client for brain.js communication (optional — works standalone)
+try:
+    from bridge_client import ask_brain, notify_brain, is_bridge_connected, close_bridge
+    _BRIDGE_AVAILABLE = True
+except ImportError:
+    _BRIDGE_AVAILABLE = False
+    def ask_brain(*a, **kw): return None
+    def notify_brain(*a, **kw): return False
+    def is_bridge_connected(): return False
+    def close_bridge(): pass
+
 # Load .env file if it exists (for ANTHROPIC_API_KEY etc.)
 _env_path = Path(__file__).resolve().parent / '.env'
 if _env_path.exists():
@@ -758,6 +769,14 @@ def wait_for_human(page, source, timeout_seconds=120):
     if not is_captcha and not (MANUAL_LOGIN and is_login_page):
         return False
 
+    # Notify brain.js if bridge is connected
+    _brain_type = 'captcha' if is_captcha else 'login_page'
+    try:
+        _page_url = page.url
+    except Exception:
+        _page_url = ''
+    notify_brain(_brain_type, {"source": source, "url": _page_url})
+
     # Bring browser to front and beep
     try:
         page.bring_to_front()
@@ -1328,6 +1347,20 @@ def trigger_heal(source, heal_url=None):
     """Convenience wrapper: open a fresh page, navigate, and attempt self-heal."""
     if not HEAL_ENABLED:
         return []
+
+    # Ask brain.js for guidance before attempting self-heal
+    brain_response = ask_brain("scraper_failed", {
+        "source": source,
+        "error": "0 results",
+        "heal_url": heal_url or (HEAL_SOURCE_CONTEXT.get(source, {}).get("heal_urls") or [""])[0],
+    })
+    if brain_response and brain_response.get("action") == "skip":
+        print(f'  🧠 Brain says skip {source}: {brain_response.get("reason", "")}')
+        return []
+    if brain_response and brain_response.get("action") == "retry" and brain_response.get("url"):
+        heal_url = brain_response["url"]
+        print(f'  🧠 Brain says try alternate URL: {heal_url}')
+
     ensure_playwright_browser()
     if ctx is None:
         return []
@@ -2289,6 +2322,7 @@ smart_total = len(reddit_rows) + len(bing_rows) + len(google_rows) + len(direct_
 print(f'\n{"="*50}')
 print(f'📊 Smart scrapers total: {smart_total} listings (before browser scrapers)')
 print(f'{"="*50}\n')
+notify_brain("status", {"message": f"Smart scrapers done: {smart_total} listings. Starting browser scrapers..."})
 
 # ## 🔵 Craigslist (RSS — no auth needed)
 #
@@ -3726,6 +3760,26 @@ else:
 # ═══════════════════════════════════════
 close_playwright_browser()
 print('✅ Playwright closed')
+
+# Send completion summary to brain.js
+try:
+    from collections import Counter as _Counter
+    _src_counts = _Counter(r.get('source', '?') for r in results)
+    notify_brain("scrape_complete", {
+        "summary": {
+            "total_unique": len(results),
+            "candidates": len(goal_results),
+            "exact_address_hits": len(exact_address_hits),
+            "contact_queue": len(contact_first_queue),
+            "mixed_visibility": len(mixed_visibility_queue),
+            "rejected": len(constraint_miss_queue),
+            "sources": dict(_src_counts),
+            "heal_log": HEAL_LOG,
+        }
+    })
+except Exception:
+    pass
+close_bridge()
 
 # ## 📱 Download Results + Diagnostics
 
