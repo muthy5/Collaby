@@ -734,7 +734,11 @@ def wait_for_human(page, source, timeout_seconds=120):
     # Poll every 3 seconds until the CAPTCHA text disappears
     waited = 0
     while waited < timeout_seconds:
-        page.wait_for_timeout(3000)
+        try:
+            page.wait_for_timeout(3000)
+        except (KeyboardInterrupt, Exception):
+            print(f'  ⏹  [{source}] Interrupted. Moving on.')
+            return False
         waited += 3
         try:
             body_text = page.locator('body').inner_text(timeout=3000).lower()
@@ -742,7 +746,10 @@ def wait_for_human(page, source, timeout_seconds=120):
             break
         if not any(p in body_text for p in CAPTCHA_PATTERNS):
             print(f'  ✅  [{source}] CAPTCHA solved! Continuing...')
-            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_timeout(2000)
+            except Exception:
+                pass
             return True
     print(f'  ⏰  [{source}] Timed out waiting for CAPTCHA solve. Skipping.')
     return False
