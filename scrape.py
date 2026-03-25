@@ -1804,17 +1804,69 @@ for sub in REDDIT_SUBS:
 ALL_RESULTS.extend(reddit_rows)
 print(f'✅ Reddit: {len(reddit_rows)} potential listings')
 
+# --- Bing Search: often less aggressive anti-bot than Google ---
+print('\n📡 Bing Search: Finding NYC sublets...')
+bing_rows = []
+BING_QUERIES = [
+    'NYC sublet Hell\'s Kitchen available now',
+    'Manhattan short term rental furnished',
+    'NYC lease break apartment Chelsea',
+    'New York sublet 3 months midtown',
+    'NYC furnished apartment short term $3000',
+]
+for query in BING_QUERIES:
+    try:
+        r = requests.get('https://www.bing.com/search', params={'q': query, 'count': 30}, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            continue
+        soup = BeautifulSoup(r.text, 'lxml')
+        listing_domains = ['craigslist', 'leasebreak', 'spareroom', 'sublet.com', 'sabbaticalhomes',
+                          'zumper', 'loftey', 'ohana', 'junehomes', 'renthop', 'listingsproject',
+                          'streeteasy', 'zillow', 'apartments.com', 'hotpads', 'facebook.com',
+                          'furnishedfinder', 'kopa.co', 'blueground', 'hellolanding', 'flip.lease',
+                          'nestpick', 'housinganywhere', 'airbnb']
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if any(domain in href.lower() for domain in listing_domains) and href.startswith('http'):
+                parent = a.find_parent(['li', 'div'])
+                text = parent.get_text(' ', strip=True)[:500] if parent else ''
+                pn, pp, em = parse_price(text)
+                bing_rows.append({
+                    'source': 'Bing Search',
+                    'title': text[:200] if text else href[:200],
+                    'price_raw': f'${pn:,}/{pp}' if pn is not None else '',
+                    'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                    'listing_type': 'Sublet', 'poster_type': '',
+                    'description': text[:300], 'url': href, 'scraped_at': now_iso(),
+                })
+        print(f'  "{query[:40]}": found links')
+    except Exception as e:
+        print(f'  Bing error: {e}')
+    polite_sleep(1, 3)
+
+ALL_RESULTS.extend(bing_rows)
+print(f'✅ Bing Search: {len(bing_rows)} listing URLs found')
+
 # --- Google Search: find sublet listings across ALL sites ---
 print('\n📡 Google Search: Finding NYC sublets across the web...')
 google_rows = []
 GOOGLE_QUERIES = [
-    'NYC sublet Hell\'s Kitchen site:craigslist.org',
+    'NYC sublet Hell\'s Kitchen',
     'NYC sublet Chelsea Manhattan',
     'NYC short term rental Hell\'s Kitchen $3000',
     'Manhattan sublet 3 months furnished',
     'NYC sublet Upper West Side $4000',
     'NYC lease break apartment Manhattan',
     'New York City sublet midtown west',
+    'NYC furnished sublet $2500 $3500',
+    'Manhattan short term lease 2025 2026',
+    'NYC apartment sublet site:reddit.com',
+    'NYC sublet site:facebook.com',
+    'NYC sublet site:streeteasy.com',
+    'Hells Kitchen sublet available now',
+    'Chelsea Manhattan furnished room rent',
+    'Lincoln Center apartment sublet',
+    'Hudson Yards short term rental',
 ]
 for query in GOOGLE_QUERIES:
     try:
@@ -1840,8 +1892,9 @@ for query in GOOGLE_QUERIES:
         # Filter to listing-like URLs
         listing_domains = ['craigslist', 'leasebreak', 'spareroom', 'sublet.com', 'sabbaticalhomes',
                           'zumper', 'loftey', 'ohana', 'junehomes', 'renthop', 'listingsproject',
-                          'streeteasy', 'zillow', 'apartments.com', 'hotpads', 'facebook.com/marketplace',
-                          'furnishedfinder', 'kopa.co', 'homeexchange', 'housinglink']
+                          'streeteasy', 'zillow', 'apartments.com', 'hotpads', 'facebook.com',
+                          'furnishedfinder', 'kopa.co', 'blueground', 'hellolanding', 'flip.lease',
+                          'nestpick', 'housinganywhere', 'airbnb', 'homeexchange']
         for link in links:
             if any(domain in link.lower() for domain in listing_domains):
                 # Get the visible text around this link for context
@@ -1879,6 +1932,16 @@ DIRECT_TARGETS = [
     ('Apartments.com', 'https://www.apartments.com/new-york-ny/short-term/'),
     ('HotPads', 'https://hotpads.com/new-york-ny/apartments-for-rent?maxPrice=4500'),
     ('Furnished Finder', 'https://www.furnishedfinder.com/housing/New-York_New-York'),
+    ('StreetEasy', 'https://streeteasy.com/for-rent/nyc/price:-4500%7Carea:300,400'),
+    ('Zillow', 'https://www.zillow.com/new-york-ny/rentals/?searchQueryState=%7B%22mapBounds%22%3A%7B%22north%22%3A40.82%2C%22south%22%3A40.7%2C%22east%22%3A-73.93%2C%22west%22%3A-74.02%7D%7D'),
+    ('Blueground', 'https://www.theblueground.com/furnished-apartments-new-york'),
+    ('Landing', 'https://www.hellolanding.com/s/new-york-city-ny'),
+    ('HousingAnywhere', 'https://housinganywhere.com/s/New-York--United-States'),
+    ('Nestpick', 'https://www.nestpick.com/new-york/'),
+    ('Kopa', 'https://www.kopa.co/housing/new-york'),
+    ('Flip', 'https://www.flip.lease/nyc'),
+    ('SpareRoom Direct', 'https://www.spareroom.com/rooms-for-rent/new-york'),
+    ('Sublet.com Direct', 'https://www.sublet.com/new-york-city'),
 ]
 for source_name, url in DIRECT_TARGETS:
     try:
@@ -1939,8 +2002,12 @@ print('\n🧠 Claude AI: Extracting listings from difficult pages...')
 claude_rows = []
 CLAUDE_TARGETS = [
     ('June Homes', 'https://junehomes.com/apartments/new-york'),
-    ('Sublet.com', 'https://www.sublet.com/new-york-city'),
+    ('Sublet.com AI', 'https://www.sublet.com/new-york-city'),
     ('Listings Project', 'https://www.listingsproject.com/real-estate/new-york-city/sublets'),
+    ('StreetEasy AI', 'https://streeteasy.com/for-rent/nyc/price:-4500%7Carea:300,400'),
+    ('Blueground AI', 'https://www.theblueground.com/furnished-apartments-new-york'),
+    ('Flip AI', 'https://www.flip.lease/nyc'),
+    ('Kopa AI', 'https://www.kopa.co/housing/new-york'),
 ]
 for source_name, url in CLAUDE_TARGETS:
     try:
@@ -1979,7 +2046,7 @@ for source_name, url in CLAUDE_TARGETS:
 ALL_RESULTS.extend(claude_rows)
 print(f'✅ Claude AI extraction: {len(claude_rows)} listings')
 
-smart_total = len(reddit_rows) + len(google_rows) + len(direct_rows) + len(claude_rows)
+smart_total = len(reddit_rows) + len(bing_rows) + len(google_rows) + len(direct_rows) + len(claude_rows)
 print(f'\n{"="*50}')
 print(f'📊 Smart scrapers total: {smart_total} listings (before browser scrapers)')
 print(f'{"="*50}\n')
