@@ -1942,6 +1942,13 @@ DIRECT_TARGETS = [
     ('Flip', 'https://www.flip.lease/nyc'),
     ('SpareRoom Direct', 'https://www.spareroom.com/rooms-for-rent/new-york'),
     ('Sublet.com Direct', 'https://www.sublet.com/new-york-city'),
+    ('Ohana', 'https://liveohana.ai'),
+    ('Listings Project', 'https://www.listingsproject.com/real-estate/new-york-city/sublets'),
+    ('LeaseBreak Direct', 'https://www.leasebreak.com/short-term-rentals-nyc'),
+    ('SabbaticalHomes Direct', 'https://www.sabbaticalhomes.com/Home-Exchange-Rental-House-Sitting-Search?field_1=New+York&field_2=NY&field_3=USA&miles=5'),
+    ('Loftey Direct', 'https://loftey.com/apartments-for-rent/manhattan/hells-kitchen'),
+    ('Zumper Direct', 'https://www.zumper.com/apartments-for-rent/new-york-ny'),
+    ('June Homes Direct', 'https://junehomes.com/apartments/new-york'),
 ]
 for source_name, url in DIRECT_TARGETS:
     try:
@@ -2008,6 +2015,10 @@ CLAUDE_TARGETS = [
     ('Blueground AI', 'https://www.theblueground.com/furnished-apartments-new-york'),
     ('Flip AI', 'https://www.flip.lease/nyc'),
     ('Kopa AI', 'https://www.kopa.co/housing/new-york'),
+    ('Ohana AI', 'https://liveohana.ai'),
+    ('LeaseBreak AI', 'https://www.leasebreak.com/short-term-rentals-nyc'),
+    ('SabbaticalHomes AI', 'https://www.sabbaticalhomes.com/Home-Exchange-Rental-House-Sitting-Search?field_1=New+York&field_2=NY&field_3=USA&miles=5'),
+    ('Loftey AI', 'https://loftey.com/apartments-for-rent/manhattan/hells-kitchen'),
 ]
 for source_name, url in CLAUDE_TARGETS:
     try:
