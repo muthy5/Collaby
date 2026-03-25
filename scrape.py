@@ -1747,8 +1747,245 @@ else:
     print(f'Detail CSV:  {detail_path}')
     display(summary_df)
 
+# ═══════════════════════════════════════════════════════════════
+# SMART SCRAPERS — requests-first, no browser, no login needed
+# These run FAST and hit sources that don't block simple HTTP
+# ═══════════════════════════════════════════════════════════════
+
+# --- Reddit: r/NYCapartments + r/nycapartments ---
+print('\n📡 Reddit: Scanning NYC apartment subreddits...')
+reddit_rows = []
+REDDIT_SUBS = [
+    'NYCapartments', 'nycapartments', 'NYCSublets',
+    'NYCroommates', 'NYCapartmentdeals',
+]
+for sub in REDDIT_SUBS:
+    for sort in ['new', 'hot']:
+        try:
+            url = f'https://www.reddit.com/r/{sub}/{sort}.json?limit=100'
+            r = requests.get(url, headers={**HEADERS, 'User-Agent': 'Collaby/1.0 apartment finder'}, timeout=15)
+            if r.status_code != 200:
+                continue
+            data = r.json().get('data', {}).get('children', [])
+            for post in data:
+                d = post.get('data', {})
+                title = d.get('title', '')
+                selftext = d.get('selftext', '')
+                full = title + ' ' + selftext
+                # Skip non-listing posts
+                if d.get('is_self') is False and not selftext:
+                    continue
+                pn, pp, em = parse_price(full)
+                if not pn and not any(w in title.lower() for w in ['sublet', 'room', 'rent', 'lease', 'apartment', 'studio', '$']):
+                    continue
+                permalink = f"https://www.reddit.com{d.get('permalink', '')}"
+                reddit_rows.append({
+                    'source': f'Reddit r/{sub}',
+                    'title': title[:200],
+                    'price_raw': f'${pn:,}/{pp}' if pn is not None else '',
+                    'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                    'neighborhood': '', 'borough': '',
+                    'bedrooms': detect_beds(full),
+                    'furnished': detect_furnished(full),
+                    'listing_type': 'Sublet',
+                    'poster_type': 'Likely Tenant',
+                    'amenities': detect_amenities(full),
+                    'building_clues': detect_building(full),
+                    'description': selftext[:300],
+                    'url': permalink,
+                    'scraped_at': now_iso(),
+                })
+            if data:
+                print(f'  r/{sub}/{sort}: {len(data)} posts')
+        except Exception as e:
+            print(f'  r/{sub}/{sort}: {e}')
+        polite_sleep(1, 2)
+
+ALL_RESULTS.extend(reddit_rows)
+print(f'✅ Reddit: {len(reddit_rows)} potential listings')
+
+# --- Google Search: find sublet listings across ALL sites ---
+print('\n📡 Google Search: Finding NYC sublets across the web...')
+google_rows = []
+GOOGLE_QUERIES = [
+    'NYC sublet Hell\'s Kitchen site:craigslist.org',
+    'NYC sublet Chelsea Manhattan',
+    'NYC short term rental Hell\'s Kitchen $3000',
+    'Manhattan sublet 3 months furnished',
+    'NYC sublet Upper West Side $4000',
+    'NYC lease break apartment Manhattan',
+    'New York City sublet midtown west',
+]
+for query in GOOGLE_QUERIES:
+    try:
+        search_url = 'https://www.google.com/search'
+        params = {'q': query, 'num': 20}
+        r = requests.get(search_url, params=params, headers={
+            **HEADERS,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        }, timeout=15)
+        if r.status_code != 200:
+            print(f'  Google returned {r.status_code} for: {query[:40]}')
+            continue
+        soup = BeautifulSoup(r.text, 'lxml')
+        links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            # Extract real URLs from Google's redirect wrapper
+            if '/url?q=' in href:
+                real_url = href.split('/url?q=')[1].split('&')[0]
+                links.append(real_url)
+            elif href.startswith('http') and 'google' not in href:
+                links.append(href)
+        # Filter to listing-like URLs
+        listing_domains = ['craigslist', 'leasebreak', 'spareroom', 'sublet.com', 'sabbaticalhomes',
+                          'zumper', 'loftey', 'ohana', 'junehomes', 'renthop', 'listingsproject',
+                          'streeteasy', 'zillow', 'apartments.com', 'hotpads', 'facebook.com/marketplace',
+                          'furnishedfinder', 'kopa.co', 'homeexchange', 'housinglink']
+        for link in links:
+            if any(domain in link.lower() for domain in listing_domains):
+                # Get the visible text around this link for context
+                parent = a.find_parent(['div', 'li', 'td'])
+                text = parent.get_text(' ', strip=True)[:500] if parent else ''
+                pn, pp, em = parse_price(text)
+                google_rows.append({
+                    'source': 'Google Search',
+                    'title': text[:200] if text else link[:200],
+                    'price_raw': f'${pn:,}/{pp}' if pn is not None else '',
+                    'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                    'neighborhood': '', 'borough': '',
+                    'bedrooms': detect_beds(text),
+                    'furnished': detect_furnished(text),
+                    'listing_type': 'Sublet',
+                    'poster_type': '',
+                    'description': text[:300],
+                    'url': link,
+                    'scraped_at': now_iso(),
+                })
+        print(f'  "{query[:40]}": {len(links)} results, {len([l for l in links if any(d in l.lower() for d in listing_domains)])} listing URLs')
+    except Exception as e:
+        print(f'  Google search error: {e}')
+    polite_sleep(2, 4)
+
+ALL_RESULTS.extend(google_rows)
+print(f'✅ Google Search: {len(google_rows)} listing URLs found')
+
+# --- Direct HTTP requests to sites (no browser, no login) ---
+print('\n📡 Direct HTTP: Trying sites without a browser...')
+direct_rows = []
+DIRECT_TARGETS = [
+    ('Craigslist HTML', 'https://newyork.craigslist.org/search/mnh/sub?max_price=4500&hasPic=1'),
+    ('RentHop', 'https://www.renthop.com/search/nyc?min_price=1000&max_price=4500&sort=hopscore&search=1&neighborhoods_str=145,110,120,128&q=sublet'),
+    ('Apartments.com', 'https://www.apartments.com/new-york-ny/short-term/'),
+    ('HotPads', 'https://hotpads.com/new-york-ny/apartments-for-rent?maxPrice=4500'),
+    ('Furnished Finder', 'https://www.furnishedfinder.com/housing/New-York_New-York'),
+]
+for source_name, url in DIRECT_TARGETS:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            print(f'  {source_name}: HTTP {r.status_code}')
+            continue
+        raw = universal_extract(r.text, url)
+        for item in raw[:80]:
+            pn, pp, em = parse_price(item.get('price_found', ''))
+            direct_rows.append({
+                'source': source_name,
+                'title': item.get('title', '')[:200],
+                'price_raw': item.get('price_found', ''),
+                'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                'neighborhood': '', 'borough': 'Manhattan',
+                'listing_type': 'Sublet',
+                'poster_type': '',
+                'description': item.get('card_text', '')[:300],
+                'url': item.get('url', ''),
+                'scraped_at': now_iso(),
+            })
+        print(f'  {source_name}: {len(raw)} listings found')
+    except Exception as e:
+        print(f'  {source_name}: {e}')
+    polite_sleep(1, 3)
+
+ALL_RESULTS.extend(direct_rows)
+print(f'✅ Direct HTTP: {len(direct_rows)} listings')
+
+# --- Claude-powered extraction for tough pages ---
+def claude_extract_listings(html, source_name, url):
+    """Send raw HTML to Claude and let it extract listings. No CSS selectors needed."""
+    if not os.environ.get('ANTHROPIC_API_KEY'):
+        return []
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        # Truncate HTML to fit in context
+        html_chunk = html[:25000]
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system="You extract apartment listings from HTML. Return ONLY a JSON array. Each object: {title, price, url, text}. If no listings found, return [].",
+            messages=[{"role": "user", "content": f"Extract all apartment/sublet/rental listings from this {source_name} page at {url}:\n\n{html_chunk}"}],
+        )
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        items = json.loads(text)
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        print(f'    Claude extraction failed: {e}')
+        return []
+
+# Try Claude extraction on sites that returned HTML but we couldn't parse with selectors
+print('\n🧠 Claude AI: Extracting listings from difficult pages...')
+claude_rows = []
+CLAUDE_TARGETS = [
+    ('June Homes', 'https://junehomes.com/apartments/new-york'),
+    ('Sublet.com', 'https://www.sublet.com/new-york-city'),
+    ('Listings Project', 'https://www.listingsproject.com/real-estate/new-york-city/sublets'),
+]
+for source_name, url in CLAUDE_TARGETS:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            print(f'  {source_name}: HTTP {r.status_code}, skipping')
+            continue
+        if len(r.text) < 500:
+            print(f'  {source_name}: page too small ({len(r.text)} chars), likely blocked')
+            continue
+        items = claude_extract_listings(r.text, source_name, url)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            pn, pp, em = parse_price(item.get('price', ''))
+            full_text = item.get('text', '')
+            claude_rows.append({
+                'source': source_name,
+                'title': (item.get('title') or '')[:200],
+                'price_raw': f'${pn:,}/{pp}' if pn is not None else item.get('price', ''),
+                'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                'neighborhood': '', 'borough': '',
+                'bedrooms': detect_beds(full_text),
+                'furnished': detect_furnished(full_text),
+                'listing_type': 'Sublet',
+                'poster_type': '',
+                'description': full_text[:300],
+                'url': item.get('url', ''),
+                'scraped_at': now_iso(),
+            })
+        print(f'  {source_name}: Claude found {len(items)} listings')
+    except Exception as e:
+        print(f'  {source_name}: {e}')
+    polite_sleep(1, 2)
+
+ALL_RESULTS.extend(claude_rows)
+print(f'✅ Claude AI extraction: {len(claude_rows)} listings')
+
+smart_total = len(reddit_rows) + len(google_rows) + len(direct_rows) + len(claude_rows)
+print(f'\n{"="*50}')
+print(f'📊 Smart scrapers total: {smart_total} listings (before browser scrapers)')
+print(f'{"="*50}\n')
+
 # ## 🔵 Craigslist (RSS — no auth needed)
-# 
+#
 
 # ==================================================
 # Cell 10
