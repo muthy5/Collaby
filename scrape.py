@@ -69,6 +69,16 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pandas as pd
 
+# Load .env file so ANTHROPIC_API_KEY is available for self-heal
+_env_path = Path(__file__).resolve().parent / '.env'
+if _env_path.exists():
+    with open(_env_path) as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 OUTPUT_DIR = Path('output')
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -3251,7 +3261,7 @@ if os.path.exists(OUTPUT_DIR / 'nyc_preflight_summary.csv'):
 
 diag_text = '\n'.join(diag)
 diag_path = OUTPUT_DIR / 'diagnostics.txt'
-with open(diag_path, 'w') as f:
+with open(diag_path, 'w', encoding='utf-8') as f:
     f.write(diag_text)
 print(diag_text)
 
