@@ -722,15 +722,27 @@ CAPTCHA_PATTERNS = [
     'access denied', 'bot detection', 'security check',
 ]
 
+MANUAL_LOGIN = True  # Pause at each login page so you can log in manually
+
 def wait_for_human(page, source, timeout_seconds=120):
-    """Detect CAPTCHA/anti-bot and pause for user to solve it manually."""
+    """Pause at login pages and CAPTCHAs so the user can act manually."""
+    is_login_page = False
+    is_captcha = False
+    try:
+        url_lower = page.url.lower()
+        is_login_page = any(w in url_lower for w in ['login', 'logon', 'signin', 'sign-in', 'sign_in'])
+    except Exception:
+        pass
     try:
         body_text = page.locator('body').inner_text(timeout=3000).lower()
+        is_captcha = any(p in body_text for p in CAPTCHA_PATTERNS)
     except Exception:
+        body_text = ''
+
+    if not is_captcha and not (MANUAL_LOGIN and is_login_page):
         return False
-    if not any(p in body_text for p in CAPTCHA_PATTERNS):
-        return False
-    # Bring browser to front and beep to get attention
+
+    # Bring browser to front and beep
     try:
         page.bring_to_front()
     except Exception:
@@ -738,29 +750,36 @@ def wait_for_human(page, source, timeout_seconds=120):
     print('\a')  # System beep
     print(f'')
     print(f'  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-    print(f'  [{source}] NEEDS YOUR HELP - CAPTCHA DETECTED')
+    if is_captcha:
+        print(f'  [{source}] CAPTCHA DETECTED')
+    else:
+        print(f'  [{source}] LOGIN PAGE')
     print(f'  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-    print(f'  1. Look at the CHROMIUM window in your taskbar')
-    print(f'     (NOT your regular Chrome — it is a separate window)')
-    print(f'  2. Solve the CAPTCHA or click "I am human"')
+    print(f'  1. Switch to the CHROMIUM window in your taskbar')
+    if is_login_page:
+        print(f'  2. Log in with your email + password')
+        print(f'     (take your time — script is paused)')
+    else:
+        print(f'  2. Solve the CAPTCHA or click "I am human"')
     print(f'  3. Come back HERE to PowerShell and press ENTER')
-    print(f'  ============================================')
+    print(f'  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
     try:
-        input('  >>> Press ENTER after solving (or ENTER to skip): ')
+        input('  >>> Press ENTER when done (or ENTER to skip): ')
     except (KeyboardInterrupt, EOFError):
         print(f'  Skipping {source}.')
         return False
-    # Check if it was actually solved
+    # Check result
     try:
         body_text = page.locator('body').inner_text(timeout=5000).lower()
         if not any(p in body_text for p in CAPTCHA_PATTERNS):
-            print(f'  ✅  [{source}] CAPTCHA solved! Continuing...')
+            print(f'  ✅  [{source}] Page looks good! Continuing...')
+            save_cookies(source)
             return True
         else:
-            print(f'  ⚠️  [{source}] Still blocked. Skipping.')
+            print(f'  ⚠️  [{source}] Still blocked. Moving on.')
             return False
     except Exception:
-        return False
+        return True  # Assume OK if we can't check
 
 
 COOKIE_DIR = OUTPUT_DIR / 'cookies'
