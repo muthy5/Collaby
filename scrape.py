@@ -471,6 +471,15 @@ def location_matches_target(record):
     if hood and text_mentions_target_neighborhood(hood):
         return True, 'neighborhood_field'
 
+    # If listing has NO location signals at all, mark as unknown (not rejected)
+    has_any_location = bool(
+        record.get('neighborhood') or record.get('address') or
+        record.get('borough') or streets or avenues or
+        any(re.search(p, text) for p in [r'\bmanhattan\b', r'\bbrooklyn\b', r'\bqueens\b', r'\bbronx\b', r'\bnyc\b', r'\bnew york\b'])
+    )
+    if not has_any_location:
+        return None, 'unknown_location'  # None = unknown, let caller decide
+
     return False, ''
 
 def price_matches_target(record):
@@ -566,8 +575,11 @@ def enrich_listing(record):
     if roommate_signal:
         beds_ok = False
 
+    area_unknown = (area_ok is None)  # No location data at all
+    area_ok_bool = bool(area_ok)  # True only if confirmed in area
+
     base_goal = active and looks_sublet and looks_short
-    search_pass = base_goal and price_ok and area_ok and duration_ok and beds_ok
+    search_pass = base_goal and price_ok and (area_ok_bool or area_unknown) and duration_ok and beds_ok
 
     fail_reasons = []
     if not active:
@@ -576,8 +588,10 @@ def enrich_listing(record):
         fail_reasons.append('not_short_term_signal')
     if not price_ok:
         fail_reasons.append(price_reason)
-    if not area_ok:
+    if not area_ok_bool and not area_unknown:
         fail_reasons.append('outside_target_area')
+    if area_unknown:
+        fail_reasons.append('unknown_location')
     if not duration_ok:
         fail_reasons.append(duration_reason or 'duration_mismatch')
     if not beds_ok:
@@ -585,6 +599,8 @@ def enrich_listing(record):
 
     if not search_pass:
         action_bucket = 'skip_not_goal'
+    elif area_unknown:
+        action_bucket = 'manual_review_or_contact'  # Unknown location — needs manual check
     elif address_found:
         action_bucket = 'exact_address_hit'
     elif address_mode == 'contact_first':
@@ -597,7 +613,7 @@ def enrich_listing(record):
     r['goal_match'] = 'Yes' if search_pass else 'No'
     r['search_pass'] = 'Yes' if search_pass else 'No'
     r['search_price_match'] = 'Yes' if price_ok else 'No'
-    r['search_area_match'] = 'Yes' if area_ok else 'No'
+    r['search_area_match'] = 'Yes' if area_ok_bool else ('Unknown' if area_unknown else 'No')
     r['search_duration_match'] = 'Yes' if duration_ok else 'No'
     r['duration_months_min'] = dmin
     r['duration_months_max'] = dmax
@@ -926,6 +942,12 @@ Available actions: wait, click, scroll_to_bottom, scroll_up, goto (same-domain o
 
 The extract action's js_code MUST be a () => expression that returns an array of objects with: title, price, url, text.
 
+IMPORTANT CSS RULES:
+- NEVER use :contains() in CSS selectors — it is NOT valid in browsers/Playwright
+- NEVER use jQuery-style pseudo-selectors
+- For text matching, use textContent checks inside JavaScript instead
+- Stick to standard CSS: .class, #id, tag, [attr], [attr*="val"], :nth-child(), etc.
+
 Keep recovery_actions under 10 steps. Be practical — try the simplest fix first."""
 
 ALLOWED_HEAL_ACTIONS = {"wait", "click", "scroll_to_bottom", "scroll_up", "fill", "press_key",
@@ -971,7 +993,7 @@ HEAL_SOURCE_CONTEXT = {
     "June Homes": {
         "expected": "Flexible-lease furnished apartment listings in NYC with monthly prices",
         "approach": "Login then browse NYC listings, extract listing cards",
-        "heal_urls": ["https://junehomes.com/apartments/new-york"],
+        "heal_urls": ["https://junehomes.com/residences/new-york-city-ny"],
     },
     "Listings Project": {
         "expected": "Curated sublet and rental listings in NYC with prices",
@@ -1042,17 +1064,36 @@ def ask_claude_for_recovery(diagnostics, source_context):
             "source": {"type": "base64", "media_type": "image/png", "data": b64}
         })
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
-        system=HEALER_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content_blocks}],
-    )
+    # Retry once on 529 overloaded
+    response = None
+    for _attempt in range(2):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=4096,
+                system=HEALER_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": content_blocks}],
+            )
+            break
+        except Exception as _api_err:
+            if '529' in str(_api_err) and _attempt == 0:
+                print('    [heal] API overloaded, retrying in 5s...')
+                time.sleep(5)
+            else:
+                raise
+    if response is None:
+        return {}
 
     text = response.content[0].text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        obj_match = re.search(r'\{[\s\S]*\}', text)
+        if obj_match:
+            return json.loads(obj_match.group())
+        raise
 
 
 def execute_healing_action(page, action, source_domain):
@@ -1990,6 +2031,21 @@ for query in BING_QUERIES:
                           'nestpick', 'housinganywhere', 'airbnb']
         for a in soup.find_all('a', href=True):
             href = a['href']
+            # Unwrap Bing's redirect: /ck/a?...&u=aHR0cHM6Ly93d3...&...
+            if 'bing.com/ck/a' in href:
+                from urllib.parse import urlparse, parse_qs, unquote
+                try:
+                    qs = parse_qs(urlparse(href).query)
+                    if 'u' in qs:
+                        import base64
+                        # Bing base64-encodes the URL with 'a1' prefix
+                        raw = qs['u'][0]
+                        if raw.startswith('a1'):
+                            href = base64.b64decode(raw[2:] + '==').decode('utf-8', errors='ignore')
+                        else:
+                            href = unquote(raw)
+                except Exception:
+                    pass
             if any(domain in href.lower() for domain in listing_domains) and href.startswith('http'):
                 parent = a.find_parent(['li', 'div'])
                 text = parent.get_text(' ', strip=True)[:500] if parent else ''
@@ -2043,42 +2099,42 @@ for query in GOOGLE_QUERIES:
             print(f'  Google returned {r.status_code} for: {query[:40]}')
             continue
         soup = BeautifulSoup(r.text, 'lxml')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            # Extract real URLs from Google's redirect wrapper
-            if '/url?q=' in href:
-                real_url = href.split('/url?q=')[1].split('&')[0]
-                links.append(real_url)
-            elif href.startswith('http') and 'google' not in href:
-                links.append(href)
-        # Filter to listing-like URLs
         listing_domains = ['craigslist', 'leasebreak', 'spareroom', 'sublet.com', 'sabbaticalhomes',
                           'zumper', 'loftey', 'ohana', 'junehomes', 'renthop', 'listingsproject',
                           'streeteasy', 'zillow', 'apartments.com', 'hotpads', 'facebook.com',
                           'furnishedfinder', 'kopa.co', 'blueground', 'hellolanding', 'flip.lease',
                           'nestpick', 'housinganywhere', 'airbnb', 'homeexchange']
-        for link in links:
-            if any(domain in link.lower() for domain in listing_domains):
-                # Get the visible text around this link for context
-                parent = a.find_parent(['div', 'li', 'td'])
-                text = parent.get_text(' ', strip=True)[:500] if parent else ''
-                pn, pp, em = parse_price(text)
-                google_rows.append({
-                    'source': 'Google Search',
-                    'title': text[:200] if text else link[:200],
-                    'price_raw': f'${pn:,}/{pp}' if pn is not None else '',
-                    'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
-                    'neighborhood': '', 'borough': '',
-                    'bedrooms': detect_beds(text),
-                    'furnished': detect_furnished(text),
-                    'listing_type': 'Sublet',
-                    'poster_type': '',
-                    'description': text[:300],
-                    'url': link,
-                    'scraped_at': now_iso(),
-                })
-        print(f'  "{query[:40]}": {len(links)} results, {len([l for l in links if any(d in l.lower() for d in listing_domains)])} listing URLs')
+        found_count = 0
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            # Extract real URL from Google's redirect wrapper
+            if '/url?q=' in href:
+                real_url = href.split('/url?q=')[1].split('&')[0]
+            elif href.startswith('http') and 'google' not in href:
+                real_url = href
+            else:
+                continue
+            if not any(domain in real_url.lower() for domain in listing_domains):
+                continue
+            found_count += 1
+            parent = a.find_parent(['div', 'li', 'td', 'span'])
+            text = parent.get_text(' ', strip=True)[:500] if parent else ''
+            pn, pp, em = parse_price(text)
+            google_rows.append({
+                'source': 'Google Search',
+                'title': text[:200] if text else real_url[:200],
+                'price_raw': f'${pn:,}/{pp}' if pn is not None else '',
+                'price_num': pn, 'price_period': pp or 'month', 'est_monthly': em,
+                'neighborhood': '', 'borough': '',
+                'bedrooms': detect_beds(text),
+                'furnished': detect_furnished(text),
+                'listing_type': 'Sublet',
+                'poster_type': '',
+                'description': text[:300],
+                'url': real_url,
+                'scraped_at': now_iso(),
+            })
+        print(f'  "{query[:40]}": {found_count} listing URLs')
     except Exception as e:
         print(f'  Google search error: {e}')
     polite_sleep(2, 4)
@@ -2111,7 +2167,7 @@ DIRECT_TARGETS = [
     ('SabbaticalHomes Direct', 'https://www.sabbaticalhomes.com/Home-Exchange-Rental-House-Sitting-Search?field_1=New+York&field_2=NY&field_3=USA&miles=5'),
     ('Loftey Direct', 'https://loftey.com/apartments-for-rent/manhattan/hells-kitchen'),
     ('Zumper Direct', 'https://www.zumper.com/apartments-for-rent/new-york-ny'),
-    ('June Homes Direct', 'https://junehomes.com/apartments/new-york'),
+    ('June Homes Direct', 'https://junehomes.com/residences/new-york-city-ny'),
 ]
 for source_name, url in DIRECT_TARGETS:
     try:
@@ -2159,9 +2215,18 @@ def claude_extract_listings(html, source_name, url):
             messages=[{"role": "user", "content": f"Extract all apartment/sublet/rental listings from this {source_name} page at {url}:\n\n{html_chunk}"}],
         )
         text = response.content[0].text.strip()
+        # Robust JSON extraction — handle markdown fences, text around JSON
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        items = json.loads(text)
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError:
+            # Try to find JSON array anywhere in the response
+            arr_match = re.search(r'\[[\s\S]*\]', text)
+            if arr_match:
+                items = json.loads(arr_match.group())
+            else:
+                return []
         return items if isinstance(items, list) else []
     except Exception as e:
         print(f'    Claude extraction failed: {e}')
@@ -2171,7 +2236,7 @@ def claude_extract_listings(html, source_name, url):
 print('\n🧠 Claude AI: Extracting listings from difficult pages...')
 claude_rows = []
 CLAUDE_TARGETS = [
-    ('June Homes', 'https://junehomes.com/apartments/new-york'),
+    ('June Homes', 'https://junehomes.com/residences/new-york-city-ny'),
     ('Sublet.com AI', 'https://www.sublet.com/new-york-city'),
     ('Listings Project', 'https://www.listingsproject.com/real-estate/new-york-city/sublets'),
     ('StreetEasy AI', 'https://streeteasy.com/for-rent/nyc/price:-4500%7Carea:300,400'),
