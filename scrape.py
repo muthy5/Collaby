@@ -153,6 +153,11 @@ SHORT_TERM_PATTERNS = [
 HARD_EXCLUDE_PATTERNS = [
     r"\b12\s*month", r"\b12-month", r"annual lease", r"long[-\s]*term only", r"year lease",
     r"no short term", r"minimum\s+12\s+months",
+    # No roommates / shared rooms
+    r"\broommate", r"\broom\s*mate", r"\bshared\s+(room|space|apartment|apt)",
+    r"\bsharing\b", r"\broom\s+in\b", r"\broom\s+for\s+rent\s+in\b",
+    r"\bprivate\s+room\s+in\s+shared", r"\blooking\s+for\s+(a\s+)?roommate",
+    r"\bcouch\b", r"\bfold.?out\b", r"\bbunk\b",
 ]
 ADDRESS_RE = re.compile(
     r"\b(\d{1,5}\s+(?:[A-Za-z0-9.'-]+\s+){0,6}"
@@ -543,8 +548,24 @@ def enrich_listing(record):
     area_ok, area_reason = location_matches_target(r)
     duration_ok, dmin, dmax, duration_reason = duration_matches_target(text)
 
+    # Bedroom filter: only studio or 1BR (no roommate situations)
+    beds = r.get('bedrooms', '')
+    beds_ok = True
+    if beds:
+        beds_lower = beds.lower().strip()
+        # Accept: studio, 1, 1br, 1 bed, 1 bedroom, empty (unknown)
+        if any(x in beds_lower for x in ['2', '3', '4', '5', '6']) and 'studio' not in beds_lower:
+            beds_ok = False
+    # Also check title/description for shared/roommate signals
+    roommate_signal = any(re.search(p, text) for p in [
+        r'\broommate', r'\broom\s*mate', r'\bshared\b', r'\broom\s+in\b',
+        r'\bprivate\s+room\s+in\b', r'\bcouch\b',
+    ])
+    if roommate_signal:
+        beds_ok = False
+
     base_goal = active and looks_sublet and looks_short
-    search_pass = base_goal and price_ok and area_ok and duration_ok
+    search_pass = base_goal and price_ok and area_ok and duration_ok and beds_ok
 
     fail_reasons = []
     if not active:
@@ -557,6 +578,8 @@ def enrich_listing(record):
         fail_reasons.append('outside_target_area')
     if not duration_ok:
         fail_reasons.append(duration_reason or 'duration_mismatch')
+    if not beds_ok:
+        fail_reasons.append('not_studio_or_1br' if not roommate_signal else 'roommate_shared')
 
     if not search_pass:
         action_bucket = 'skip_not_goal'
@@ -689,6 +712,41 @@ def ensure_playwright_browser(headless=False):
         pass
     page = ctx.new_page()
     return browser, ctx, page
+
+CAPTCHA_PATTERNS = [
+    'captcha', 'recaptcha', 'hcaptcha', 'verify you are human', 'are you a robot',
+    'cloudflare', 'challenge-platform', 'cf-browser-verification',
+    'just a moment', 'checking your browser', 'please verify',
+    'access denied', 'bot detection', 'security check',
+]
+
+def wait_for_human(page, source, timeout_seconds=120):
+    """Detect CAPTCHA/anti-bot and pause for user to solve it manually."""
+    try:
+        body_text = page.locator('body').inner_text(timeout=3000).lower()
+    except Exception:
+        return False
+    if not any(p in body_text for p in CAPTCHA_PATTERNS):
+        return False
+    print(f'\n  ⚠️  [{source}] CAPTCHA or anti-bot detected!')
+    print(f'  👉  Solve it in the browser window, then come back here.')
+    print(f'  ⏳  Waiting up to {timeout_seconds}s for you...')
+    # Poll every 3 seconds until the CAPTCHA text disappears
+    waited = 0
+    while waited < timeout_seconds:
+        page.wait_for_timeout(3000)
+        waited += 3
+        try:
+            body_text = page.locator('body').inner_text(timeout=3000).lower()
+        except Exception:
+            break
+        if not any(p in body_text for p in CAPTCHA_PATTERNS):
+            print(f'  ✅  [{source}] CAPTCHA solved! Continuing...')
+            page.wait_for_timeout(2000)
+            return True
+    print(f'  ⏰  [{source}] Timed out waiting for CAPTCHA solve. Skipping.')
+    return False
+
 
 def record_scrape_result(source, rows):
     """Update SOURCE_HEALTH after a scraper runs, so the run log shows what happened."""
@@ -1152,6 +1210,7 @@ def trigger_heal(source, heal_url=None):
         _setup_console_capture(heal_pg)
         heal_pg.goto(url, timeout=30000, wait_until='domcontentloaded')
         heal_pg.wait_for_timeout(4000)
+        wait_for_human(heal_pg, source)  # Let user solve CAPTCHA if needed
         return attempt_self_heal(heal_pg, source)
     except Exception as e:
         print(f'  [heal] Could not open page for {source}: {e}')
@@ -1757,7 +1816,7 @@ print('\n📡 Reddit: Scanning NYC apartment subreddits...')
 reddit_rows = []
 REDDIT_SUBS = [
     'NYCapartments', 'nycapartments', 'NYCSublets',
-    'NYCroommates', 'NYCapartmentdeals',
+    'NYCapartmentdeals', 'NYCSublet',
 ]
 for sub in REDDIT_SUBS:
     for sort in ['new', 'hot']:
@@ -1992,7 +2051,7 @@ def claude_extract_listings(html, source_name, url):
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            system="You extract apartment listings from HTML. Return ONLY a JSON array. Each object: {title, price, url, text}. If no listings found, return [].",
+            system="You extract apartment listings from HTML. We want: furnished studios or 1-bedrooms in Manhattan, sublets or short-term rentals under $4500/month, available for 3-6 months, no roommate situations. Return ONLY a JSON array. Each object: {title, price, url, text, bedrooms, furnished}. If no listings found, return [].",
             messages=[{"role": "user", "content": f"Extract all apartment/sublet/rental listings from this {source_name} page at {url}:\n\n{html_chunk}"}],
         )
         text = response.content[0].text.strip()
