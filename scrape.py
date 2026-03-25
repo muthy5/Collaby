@@ -763,6 +763,62 @@ def wait_for_human(page, source, timeout_seconds=120):
         return False
 
 
+COOKIE_DIR = OUTPUT_DIR / 'cookies'
+COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_cookies(source):
+    """Save browser cookies after successful login."""
+    if ctx is None:
+        return
+    try:
+        cookies = ctx.cookies()
+        path = COOKIE_DIR / f'{slugify(source)}.json'
+        with open(path, 'w') as f:
+            json.dump(cookies, f, indent=2)
+        print(f'    💾 Cookies saved for {source} ({len(cookies)} cookies)')
+    except Exception as e:
+        print(f'    ⚠️ Could not save cookies for {source}: {e}')
+
+def load_cookies(source):
+    """Load saved cookies for a site. Returns True if cookies were loaded."""
+    if ctx is None:
+        return False
+    path = COOKIE_DIR / f'{slugify(source)}.json'
+    if not path.exists():
+        return False
+    try:
+        with open(path) as f:
+            cookies = json.load(f)
+        if not cookies:
+            return False
+        ctx.add_cookies(cookies)
+        print(f'    🍪 Loaded saved cookies for {source} ({len(cookies)} cookies)')
+        return True
+    except Exception as e:
+        print(f'    ⚠️ Could not load cookies for {source}: {e}')
+        return False
+
+def login_with_cookies(page, source, login_url, success_check_fn=None):
+    """Try to skip login using saved cookies. Returns True if already logged in."""
+    if not load_cookies(source):
+        return False
+    try:
+        page.goto(login_url, timeout=30000, wait_until='domcontentloaded')
+        page.wait_for_timeout(3000)
+        # Check if we're already logged in (redirected away from login page)
+        if 'login' not in page.url.lower() and 'logon' not in page.url.lower() and 'signin' not in page.url.lower():
+            print(f'    ✅ Cookie login worked for {source}!')
+            save_cookies(source)  # Refresh cookies
+            return True
+        if success_check_fn and success_check_fn(page):
+            print(f'    ✅ Cookie login worked for {source}!')
+            save_cookies(source)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def record_scrape_result(source, rows):
     """Update SOURCE_HEALTH after a scraper runs, so the run log shows what happened."""
     current = SOURCE_HEALTH.get(source, {})
@@ -1469,6 +1525,7 @@ def require_logged_in(pg, source, success_selectors=None, success_text=None, sta
     ok = confirm_logged_in(pg, source, success_selectors=success_selectors, success_text=success_text)
     if ok:
         print(f'    ✅ Auth confirmed for {source}')
+        save_cookies(source)  # Save cookies so we skip login next time
         return True
     artifacts = auth_save_artifacts(source, pg, stage=stage)
     raise RuntimeError(f'{source} login not confirmed; artifacts=' + '; '.join(artifacts))
@@ -1490,6 +1547,19 @@ if ctx is None:
     print('⚠️ Browser failed to launch. Browser-based scrapers will be skipped.')
 else:
     print('✅ Playwright browser ready (visible mode — you will see a Chrome window)')
+    # Load all saved cookies from previous runs
+    _loaded_any = False
+    for _cf in sorted(COOKIE_DIR.glob('*.json')):
+        try:
+            with open(_cf) as _f:
+                _cookies = json.load(_f)
+            if _cookies:
+                ctx.add_cookies(_cookies)
+                _loaded_any = True
+        except Exception:
+            pass
+    if _loaded_any:
+        print('🍪 Loaded saved login cookies from previous run')
 
 # ## Preflight
 
